@@ -34,11 +34,25 @@ struct SystemScreenshotCaptureService: ScreenshotCapturing {
     func capture(to destination: URL) async throws -> ScreenshotCaptureResult {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
+            let errors = Pipe()
             process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-            process.arguments = ["-i", "-x", "-t", "png", destination.path]
+            // Force region selection instead of inheriting the user's last
+            // window/toolbar mode. Ask macOS to surface genuine capture errors.
+            process.arguments = ["-i", "-s", "-x", "-d", "-t", "png", destination.path]
+            process.standardError = errors
             process.terminationHandler = { process in
                 guard FileManager.default.fileExists(atPath: destination.path) else {
-                    continuation.resume(returning: .cancelled)
+                    let errorText = String(
+                        data: errors.fileHandleForReading.readDataToEndOfFile(),
+                        encoding: .utf8
+                    )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if process.terminationStatus == 1, errorText.isEmpty {
+                        continuation.resume(returning: .cancelled)
+                    } else {
+                        continuation.resume(throwing: ScreenshotCaptureError.launchFailed(
+                            errorText.isEmpty ? L10n.string("The screenshot could not be saved") : errorText
+                        ))
+                    }
                     return
                 }
                 guard process.terminationStatus == 0,
