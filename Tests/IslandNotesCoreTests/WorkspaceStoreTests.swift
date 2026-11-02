@@ -193,6 +193,84 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(store.resolveShelfURL(for: item)?.path, url.path)
     }
 
+    func testLegacyWorkspaceWithoutScreenshotsDecodesAsEmpty() throws {
+        let raw = ##"{"notes":[{"id":"00000000-0000-0000-0000-000000000001","title":"欢迎","markdown":"# 欢迎\n","createdAt":"2001-01-01T00:00:00Z","updatedAt":"2001-01-01T00:00:00Z"}],"activeNoteID":"00000000-0000-0000-0000-000000000001","shelf":[],"preferences":{}}"##
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let workspace = try decoder.decode(PersistedWorkspace.self, from: Data(raw.utf8))
+        XCTAssertTrue(workspace.screenshots.isEmpty)
+    }
+
+    func testScreenshotHistoryKeepsNewestFiveAndPersistsFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = WorkspaceStore(
+            storageURL: root.appendingPathComponent("workspace.json"),
+            screenshotDirectoryURL: root.appendingPathComponent("Screenshots", isDirectory: true)
+        )
+
+        for index in 0..<6 {
+            let temporary = try store.makeTemporaryScreenshotURL()
+            try Data("capture-\(index)".utf8).write(to: temporary)
+            try store.commitScreenshot(
+                at: temporary,
+                pixelWidth: 1_000 + index,
+                pixelHeight: 700 + index,
+                now: Date(timeIntervalSince1970: TimeInterval(index))
+            )
+        }
+
+        XCTAssertEqual(store.screenshots.count, 5)
+        XCTAssertEqual(store.screenshots.map(\.pixelWidth), [1_005, 1_004, 1_003, 1_002, 1_001])
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(at: store.screenshotDirectoryURL, includingPropertiesForKeys: nil)
+                .filter { !$0.lastPathComponent.hasPrefix(".") }.count,
+            5
+        )
+
+        let restored = WorkspaceStore(
+            storageURL: root.appendingPathComponent("workspace.json"),
+            screenshotDirectoryURL: root.appendingPathComponent("Screenshots", isDirectory: true)
+        )
+        XCTAssertEqual(restored.screenshots, store.screenshots)
+    }
+
+    func testScreenshotCommitFailureKeepsWorkspaceUnchanged() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let invalidStorageURL = root.appendingPathComponent("workspace-directory", isDirectory: true)
+        try FileManager.default.createDirectory(at: invalidStorageURL, withIntermediateDirectories: true)
+        let store = WorkspaceStore(
+            storageURL: invalidStorageURL,
+            screenshotDirectoryURL: root.appendingPathComponent("Screenshots", isDirectory: true)
+        )
+        let temporary = try store.makeTemporaryScreenshotURL()
+        try Data("capture".utf8).write(to: temporary)
+
+        XCTAssertThrowsError(try store.commitScreenshot(at: temporary, pixelWidth: 1200, pixelHeight: 800))
+        XCTAssertTrue(store.screenshots.isEmpty)
+        XCTAssertTrue(
+            (try FileManager.default.contentsOfDirectory(at: store.screenshotDirectoryURL, includingPropertiesForKeys: nil))
+                .filter { !$0.lastPathComponent.hasPrefix(".") }.isEmpty
+        )
+    }
+
+    func testRemovingScreenshotDeletesRecordAndFile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = WorkspaceStore(
+            storageURL: root.appendingPathComponent("workspace.json"),
+            screenshotDirectoryURL: root.appendingPathComponent("Screenshots", isDirectory: true)
+        )
+        let temporary = try store.makeTemporaryScreenshotURL()
+        try Data("capture".utf8).write(to: temporary)
+        let record = try store.commitScreenshot(at: temporary, pixelWidth: 1200, pixelHeight: 800)
+        let finalURL = store.screenshotURL(for: record)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: finalURL.path))
+
+        store.removeScreenshot(record.id)
+        XCTAssertTrue(store.screenshots.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: finalURL.path))
+    }
+
     func testActivationTriggerAdaptsToMenuBarHeightAndPreventsHoverBounceBack() {
         let externalScreen = TopEdgeActivationMonitor.ScreenMetrics(
             frame: NSRect(x: 0, y: 0, width: 1920, height: 1080),

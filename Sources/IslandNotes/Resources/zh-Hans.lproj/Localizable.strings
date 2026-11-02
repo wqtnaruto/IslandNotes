@@ -37,3 +37,12 @@
 "Stop focus" = "停止专注";
 "Time to stand up, stretch, and look away from the screen." = "休息一下，站起来活动并看看远处。";
 "References stay local; original files are not moved." = "参考文件保留在原位置";
+"Recent screenshots" = "最近截图";
+"Capture new screenshot" = "截取新截图";
+"Your five most recent screenshots appear here" = "最近五张截图会保存在这里";
+"Copy screenshot" = "复制截图";
+"Copied" = "已复制";
+"Just now" = "刚刚";
+"Minutes ago format" = "%d 分钟前";
+"Yesterday time format" = "昨天 %@";
+"The screenshot could not be saved" = "截图无法保存";

@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import QuartzCore
 import SwiftUI
 
@@ -142,6 +143,57 @@ final class PanelClipView: NSView {
 extension Notification.Name {
     static let islandNotesCreatePage = Notification.Name("IslandNotes.createPage")
     static let islandNotesPanelVisibility = Notification.Name("IslandNotes.panelVisibility")
+    static let islandNotesScreenshotCaptured = Notification.Name("IslandNotes.screenshotCaptured")
+}
+
+final class GlobalHotKeyController {
+    private var eventHandler: EventHandlerRef?
+    private var hotKey: EventHotKeyRef?
+    private let action: () -> Void
+
+    init?(keyCode: UInt32, modifiers: UInt32, action: @escaping () -> Void) {
+        self.action = action
+        var eventSpec = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let installStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, _, userData in
+                guard let userData else { return OSStatus(eventNotHandledErr) }
+                let controller = Unmanaged<GlobalHotKeyController>
+                    .fromOpaque(userData)
+                    .takeUnretainedValue()
+                controller.action()
+                return noErr
+            },
+            1,
+            &eventSpec,
+            Unmanaged.passUnretained(self).toOpaque(),
+            &eventHandler
+        )
+        guard installStatus == noErr else { return nil }
+
+        let hotKeyID = EventHotKeyID(signature: 0x494E5353, id: 1) // INSS
+        let registerStatus = RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKey
+        )
+        guard registerStatus == noErr else {
+            if let eventHandler { RemoveEventHandler(eventHandler) }
+            self.eventHandler = nil
+            return nil
+        }
+    }
+
+    deinit {
+        if let hotKey { UnregisterEventHotKey(hotKey) }
+        if let eventHandler { RemoveEventHandler(eventHandler) }
+    }
 }
 
 @MainActor
@@ -200,8 +252,15 @@ final class PanelCoordinator {
             object: panel,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.hide()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await Task.yield()
+                // Interactive SwiftUI popovers use a separate key window. Keep the
+                // notch panel alive while one of its controls owns that window.
+                if let keyWindow = NSApp.keyWindow, keyWindow !== self.panel {
+                    return
+                }
+                self.hide()
             }
         }
     }
@@ -218,6 +277,10 @@ final class PanelCoordinator {
     var isVisible: Bool { isPresented }
 
     func dismissIfClickedOutside(at screenPoint: NSPoint) {
+        let insideRelatedWindow = NSApp.windows.contains { window in
+            window !== panel && window.isVisible && window.frame.contains(screenPoint)
+        }
+        guard !insideRelatedWindow else { return }
         guard Self.shouldDismissForExternalClick(
             at: screenPoint,
             panelFrame: panel.frame,
@@ -406,6 +469,7 @@ final class PanelCoordinator {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = WorkspaceStore()
+    private let screenshotCaptureService: any ScreenshotCapturing = SystemScreenshotCaptureService()
     private let keepAwake = KeepAwakeController()
     private let reminder = BreakReminder()
     private let activationMonitor = TopEdgeActivationMonitor()
@@ -415,6 +479,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var outsideClickMonitor: Any?
     private var outsideClickPollTimer: Timer?
     private var previousPressedMouseButtons = 0
+    private var screenshotTask: Task<Void, Never>?
+    private var captureHotKey: GlobalHotKeyController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -426,7 +492,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 reminder: reminder,
                 layoutState: layoutState,
                 onClose: { [weak self] in self?.panel.hide() },
-                preferencesChanged: { [weak self] in self?.applyPreferences() }
+                preferencesChanged: { [weak self] in self?.applyPreferences() },
+                captureScreenshot: { [weak self] in self?.beginScreenshotCapture() }
             )
         )
         panel.onVisibilityChanged = { [weak self] visible in
@@ -442,6 +509,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.action = #selector(togglePanel)
 
         activationMonitor.activate = { [weak self] in self?.panel.show() }
+        captureHotKey = GlobalHotKeyController(
+            keyCode: UInt32(kVK_ANSI_2),
+            modifiers: UInt32(cmdKey | optionKey)
+        ) { [weak self] in
+            Task { @MainActor [weak self] in self?.beginScreenshotCapture() }
+        }
         applyPreferences()
         activationMonitor.start()
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
@@ -455,6 +528,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        screenshotTask?.cancel()
+        screenshotTask = nil
+        captureHotKey = nil
         activationMonitor.stop()
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
@@ -471,6 +547,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePanel() { panel.toggle() }
+
+    private func beginScreenshotCapture() {
+        guard screenshotTask == nil else { return }
+        let wasVisible = panel.isVisible
+        store.reportExternalError(nil)
+        if wasVisible { panel.hide() }
+
+        screenshotTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.screenshotTask = nil }
+
+            if wasVisible {
+                try? await Task.sleep(nanoseconds: 240_000_000)
+                guard !Task.isCancelled else { return }
+            }
+
+            var temporaryURL: URL?
+            do {
+                let destination = try self.store.makeTemporaryScreenshotURL()
+                temporaryURL = destination
+                let result = try await self.screenshotCaptureService.capture(to: destination)
+                guard !Task.isCancelled else {
+                    self.store.discardTemporaryScreenshot(at: destination)
+                    return
+                }
+
+                switch result {
+                case let .captured(capture):
+                    _ = try self.store.commitScreenshot(
+                        at: capture.url,
+                        pixelWidth: capture.pixelWidth,
+                        pixelHeight: capture.pixelHeight
+                    )
+                    self.panel.show()
+                    NotificationCenter.default.post(name: .islandNotesScreenshotCaptured, object: nil)
+                case .cancelled:
+                    self.store.discardTemporaryScreenshot(at: destination)
+                    if wasVisible { self.panel.show() }
+                }
+            } catch {
+                if let temporaryURL { self.store.discardTemporaryScreenshot(at: temporaryURL) }
+                self.store.reportExternalError(error.localizedDescription)
+                self.panel.show()
+            }
+        }
+    }
 
     private func setOutsideClickPollingEnabled(_ enabled: Bool) {
         outsideClickPollTimer?.invalidate()

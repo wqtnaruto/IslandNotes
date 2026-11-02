@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -13,8 +14,10 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var systemScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var panelVisible = false
+    @State private var screenshotHistoryPresented = false
     let onClose: () -> Void
     let preferencesChanged: () -> Void
+    let captureScreenshot: () -> Void
 
     private var theme: VisualTheme {
         VisualTheme(isDark: store.preferences.themeMode == .dark ||
@@ -60,6 +63,9 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .islandNotesCreatePage)) { _ in
             _ = store.addNote()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .islandNotesScreenshotCaptured)) { _ in
+            screenshotHistoryPresented = true
         }
         .onChange(of: focusedRenameID) { _, focused in
             if focused == nil, let activeRename = renamingID {
@@ -126,6 +132,36 @@ struct ContentView: View {
                     .font(.system(size: 12, weight: .light))
             }
             Spacer()
+            Button {
+                screenshotHistoryPresented.toggle()
+            } label: {
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: "camera.viewfinder")
+                        .font(.system(size: 14, weight: .regular))
+                        .frame(width: 30, height: 30)
+                    if !store.screenshots.isEmpty {
+                        Text("\(store.screenshots.count)")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 13, minHeight: 13)
+                            .background(theme.accent, in: Circle())
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(L10n.string("Recent screenshots"))
+            .accessibilityLabel(L10n.string("Recent screenshots"))
+            .popover(isPresented: $screenshotHistoryPresented, arrowEdge: .top) {
+                ScreenshotHistoryPopover(
+                    store: store,
+                    theme: theme,
+                    captureScreenshot: {
+                        screenshotHistoryPresented = false
+                        captureScreenshot()
+                    }
+                )
+            }
             Menu {
                 Picker(L10n.string("Open from"), selection: activationBinding) {
                     ForEach(ActivationMode.allCases) { mode in
@@ -154,7 +190,8 @@ struct ContentView: View {
             .menuIndicator(.hidden)
             .frame(width: 24)
         }
-        .padding(.horizontal, 16)
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
         .frame(height: 46)
     }
 
@@ -349,6 +386,191 @@ struct ContentView: View {
 private struct NoteTabSummary: Equatable, Identifiable {
     let id: UUID
     let title: String
+}
+
+private struct ScreenshotHistoryPopover: View {
+    @ObservedObject var store: WorkspaceStore
+    let theme: VisualTheme
+    let captureScreenshot: () -> Void
+    @State private var selectedID: UUID?
+    @State private var copiedID: UUID?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(L10n.string("Recent screenshots"))
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Text("\(store.screenshots.count) / 5")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(theme.secondary)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 40)
+
+            Button(action: captureScreenshot) {
+                HStack(spacing: 8) {
+                    Image(systemName: "camera")
+                    Text(L10n.string("Capture new screenshot"))
+                    Spacer()
+                    Text("⌥⌘2")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(theme.secondary)
+                }
+                .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 11)
+                .frame(height: 38)
+                .background(theme.activeTab, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.edge, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 9)
+
+            if store.screenshots.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "rectangle.stack.badge.plus")
+                        .font(.system(size: 24, weight: .light))
+                    Text(L10n.string("Your five most recent screenshots appear here"))
+                        .font(.system(size: 11))
+                        .multilineTextAlignment(.center)
+                }
+                .foregroundStyle(theme.secondary)
+                .frame(maxWidth: .infinity, minHeight: 116)
+                .padding(.horizontal, 28)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(store.screenshots) { record in
+                        screenshotRow(record)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
+            }
+        }
+        .frame(width: 320)
+        .foregroundStyle(theme.foreground)
+        .background(theme.editor)
+        .environment(\.colorScheme, theme.isDark ? .dark : .light)
+    }
+
+    private func screenshotRow(_ record: ScreenshotRecord) -> some View {
+        let url = store.screenshotURL(for: record)
+        let selected = selectedID == record.id
+        return HStack(spacing: 10) {
+            ScreenshotThumbnail(url: url, theme: theme)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(relativeTimestamp(for: record.createdAt))
+                    .font(.system(size: 11, weight: .medium))
+                Text("\(record.pixelWidth) × \(record.pixelHeight)")
+                    .font(.system(size: 9))
+                    .foregroundStyle(theme.secondary)
+            }
+            Spacer(minLength: 4)
+            Button {
+                copyScreenshot(record)
+            } label: {
+                Image(systemName: copiedID == record.id ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(copiedID == record.id ? theme.accent : theme.foreground)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(L10n.string(copiedID == record.id ? "Copied" : "Copy screenshot"))
+            .accessibilityLabel(L10n.string(copiedID == record.id ? "Copied" : "Copy screenshot"))
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 60)
+        .background(selected ? theme.accent.opacity(0.14) : theme.inactiveTab,
+                    in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(selected ? theme.accent : theme.edge, lineWidth: selected ? 1.2 : 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onTapGesture(count: 2) { NSWorkspace.shared.open(url) }
+        .onTapGesture { selectedID = record.id }
+        .draggable(url)
+        .contextMenu {
+            Button(L10n.string("Copy screenshot")) { copyScreenshot(record) }
+            Button(L10n.string("Open")) { NSWorkspace.shared.open(url) }
+            Button(L10n.string("Show in Finder")) {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+            Divider()
+            Button(L10n.string("Delete"), role: .destructive) {
+                store.removeScreenshot(record.id)
+                if selectedID == record.id { selectedID = nil }
+            }
+        }
+    }
+
+    private func copyScreenshot(_ record: ScreenshotRecord) {
+        guard let image = NSImage(contentsOf: store.screenshotURL(for: record)) else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects([image]) else { return }
+        copiedID = record.id
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            if copiedID == record.id { copiedID = nil }
+        }
+    }
+
+    private func relativeTimestamp(for date: Date) -> String {
+        let elapsed = max(0, Date().timeIntervalSince(date))
+        if elapsed < 60 { return L10n.string("Just now") }
+        if elapsed < 3_600 {
+            return String(format: L10n.string("Minutes ago format"), Int(elapsed / 60))
+        }
+        if Calendar.current.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        if Calendar.current.isDateInYesterday(date) {
+            return String(format: L10n.string("Yesterday time format"), date.formatted(date: .omitted, time: .shortened))
+        }
+        return date.formatted(.dateTime.month().day().hour().minute())
+    }
+}
+
+private struct ScreenshotThumbnail: View {
+    let url: URL
+    let theme: VisualTheme
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 14, weight: .light))
+                    .foregroundStyle(theme.secondary)
+            }
+        }
+        .frame(width: 76, height: 46)
+        .background(theme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.edge, lineWidth: 1))
+        .task(id: url) {
+            image = await Self.loadThumbnail(at: url)
+        }
+    }
+
+    private static func loadThumbnail(at url: URL) async -> NSImage? {
+        await Task.detached(priority: .utility) {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 240,
+                    kCGImageSourceCreateThumbnailWithTransform: true
+                  ] as CFDictionary) else { return nil }
+            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        }.value
+    }
 }
 
 private struct MarkdownToolbarView: View, Equatable {

@@ -1,19 +1,38 @@
 import Foundation
 
+enum ScreenshotStoreError: LocalizedError {
+    case invalidCapture
+    case persistence(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidCapture:
+            L10n.string("The screenshot could not be saved")
+        case let .persistence(message):
+            message
+        }
+    }
+}
+
 @MainActor
 final class WorkspaceStore: ObservableObject {
     @Published private(set) var workspace: PersistedWorkspace
     @Published private(set) var lastSaveError: String?
 
     let storageURL: URL
+    let screenshotDirectoryURL: URL
     private let ioQueue = DispatchQueue(label: "dev.islandnotes.workspace-io", qos: .utility)
     private var pendingSaveTask: Task<Void, Never>?
     private var saveGeneration: UInt64 = 0
     private var shelfURLCache: [UUID: URL] = [:]
     private var resolvingShelfIDs: Set<UUID> = []
 
-    init(storageURL: URL? = nil) {
+    init(storageURL: URL? = nil, screenshotDirectoryURL: URL? = nil) {
         self.storageURL = storageURL ?? Self.defaultStorageURL()
+        self.screenshotDirectoryURL = screenshotDirectoryURL ?? self.storageURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("Screenshots", isDirectory: true)
+        let resolvedScreenshotDirectory = self.screenshotDirectoryURL
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
@@ -23,6 +42,18 @@ final class WorkspaceStore: ObservableObject {
            !decoded.notes.isEmpty,
            decoded.notes.contains(where: { $0.id == decoded.activeNoteID }) {
             shouldPersistMigration = decoded.migrateLegacyEnglishStarterContent()
+            let validScreenshots = decoded.screenshots
+                .prefix(5)
+                .filter { record in
+                    record.fileName == URL(fileURLWithPath: record.fileName).lastPathComponent &&
+                        FileManager.default.fileExists(
+                            atPath: resolvedScreenshotDirectory.appendingPathComponent(record.fileName).path
+                        )
+                }
+            if Array(validScreenshots) != decoded.screenshots {
+                decoded.screenshots = Array(validScreenshots)
+                shouldPersistMigration = true
+            }
             self.workspace = decoded
         } else {
             self.workspace = .fresh()
@@ -35,6 +66,7 @@ final class WorkspaceStore: ObservableObject {
 
     var notes: [NotePage] { workspace.notes }
     var shelf: [ShelfReference] { workspace.shelf }
+    var screenshots: [ScreenshotRecord] { workspace.screenshots }
     var preferences: AppPreferences { workspace.preferences }
     var activeNoteID: UUID { workspace.activeNoteID }
 
@@ -115,6 +147,92 @@ final class WorkspaceStore: ObservableObject {
         resolvingShelfIDs.remove(id)
         guard workspace.shelf.count != countBefore else { return }
         save()
+    }
+
+    func makeTemporaryScreenshotURL() throws -> URL {
+        try FileManager.default.createDirectory(
+            at: screenshotDirectoryURL,
+            withIntermediateDirectories: true
+        )
+        return screenshotDirectoryURL.appendingPathComponent(".capture-\(UUID().uuidString).png")
+    }
+
+    @discardableResult
+    func commitScreenshot(
+        at temporaryURL: URL,
+        pixelWidth: Int,
+        pixelHeight: Int,
+        now: Date = Date()
+    ) throws -> ScreenshotRecord {
+        guard temporaryURL.deletingLastPathComponent().standardizedFileURL == screenshotDirectoryURL.standardizedFileURL,
+              FileManager.default.fileExists(atPath: temporaryURL.path),
+              pixelWidth > 0,
+              pixelHeight > 0 else {
+            throw ScreenshotStoreError.invalidCapture
+        }
+
+        let id = UUID()
+        let fileName = "\(id.uuidString).png"
+        let destination = screenshotDirectoryURL.appendingPathComponent(fileName)
+        try FileManager.default.moveItem(at: temporaryURL, to: destination)
+
+        let record = ScreenshotRecord(
+            id: id,
+            fileName: fileName,
+            createdAt: now,
+            pixelWidth: pixelWidth,
+            pixelHeight: pixelHeight
+        )
+        var updated = workspace
+        updated.screenshots.insert(record, at: 0)
+        let removed = Array(updated.screenshots.dropFirst(5))
+        updated.screenshots = Array(updated.screenshots.prefix(5))
+
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
+        saveGeneration &+= 1
+        if let message = Self.writeSnapshot(updated, to: storageURL) {
+            try? FileManager.default.removeItem(at: destination)
+            updateSaveError(message)
+            throw ScreenshotStoreError.persistence(message)
+        }
+
+        workspace = updated
+        updateSaveError(nil)
+        for oldRecord in removed {
+            try? FileManager.default.removeItem(at: screenshotURL(for: oldRecord))
+        }
+        return record
+    }
+
+    func discardTemporaryScreenshot(at url: URL) {
+        guard url.deletingLastPathComponent().standardizedFileURL == screenshotDirectoryURL.standardizedFileURL else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    func screenshotURL(for record: ScreenshotRecord) -> URL {
+        screenshotDirectoryURL.appendingPathComponent(record.fileName)
+    }
+
+    func removeScreenshot(_ id: UUID) {
+        guard let record = workspace.screenshots.first(where: { $0.id == id }) else { return }
+        var updated = workspace
+        updated.screenshots.removeAll { $0.id == id }
+
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
+        saveGeneration &+= 1
+        if let message = Self.writeSnapshot(updated, to: storageURL) {
+            updateSaveError(message)
+            return
+        }
+        workspace = updated
+        updateSaveError(nil)
+        try? FileManager.default.removeItem(at: screenshotURL(for: record))
+    }
+
+    func reportExternalError(_ message: String?) {
+        updateSaveError(message)
     }
 
     /// O(1) non-blocking URL lookup safe for SwiftUI view rendering and drag sources.

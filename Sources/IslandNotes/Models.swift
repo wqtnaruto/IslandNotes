@@ -68,6 +68,28 @@ struct ShelfReference: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+struct ScreenshotRecord: Codable, Equatable, Identifiable, Sendable {
+    let id: UUID
+    let fileName: String
+    let createdAt: Date
+    let pixelWidth: Int
+    let pixelHeight: Int
+
+    init(
+        id: UUID = UUID(),
+        fileName: String,
+        createdAt: Date = Date(),
+        pixelWidth: Int,
+        pixelHeight: Int
+    ) {
+        self.id = id
+        self.fileName = fileName
+        self.createdAt = createdAt
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+    }
+}
+
 enum ActivationMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case click
     case hover
@@ -116,7 +138,35 @@ struct PersistedWorkspace: Codable, Equatable, Sendable {
     var notes: [NotePage]
     var activeNoteID: UUID
     var shelf: [ShelfReference]
+    var screenshots: [ScreenshotRecord]
     var preferences: AppPreferences
+
+    enum CodingKeys: String, CodingKey {
+        case notes, activeNoteID, shelf, screenshots, preferences
+    }
+
+    init(
+        notes: [NotePage],
+        activeNoteID: UUID,
+        shelf: [ShelfReference],
+        screenshots: [ScreenshotRecord] = [],
+        preferences: AppPreferences
+    ) {
+        self.notes = notes
+        self.activeNoteID = activeNoteID
+        self.shelf = shelf
+        self.screenshots = screenshots
+        self.preferences = preferences
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        notes = try values.decode([NotePage].self, forKey: .notes)
+        activeNoteID = try values.decode(UUID.self, forKey: .activeNoteID)
+        shelf = try values.decodeIfPresent([ShelfReference].self, forKey: .shelf) ?? []
+        screenshots = try values.decodeIfPresent([ScreenshotRecord].self, forKey: .screenshots) ?? []
+        preferences = try values.decodeIfPresent(AppPreferences.self, forKey: .preferences) ?? AppPreferences()
+    }
 
     static func fresh(now: Date = Date()) -> PersistedWorkspace {
         let welcome = L10n.defaultChineseString("Welcome")
@@ -125,6 +175,7 @@ struct PersistedWorkspace: Codable, Equatable, Sendable {
             notes: [first],
             activeNoteID: first.id,
             shelf: [],
+            screenshots: [],
             preferences: AppPreferences()
         )
     }

@@ -37,3 +37,12 @@
 "Stop focus" = "Stop focus";
 "Time to stand up, stretch, and look away from the screen." = "Time to stand up, stretch, and look away from the screen.";
 "References stay local; original files are not moved." = "References stay local; original files are not moved.";
+"Recent screenshots" = "Recent screenshots";
+"Capture new screenshot" = "Capture new screenshot";
+"Your five most recent screenshots appear here" = "Your five most recent screenshots appear here";
+"Copy screenshot" = "Copy screenshot";
+"Copied" = "Copied";
+"Just now" = "Just now";
+"Minutes ago format" = "%d min ago";
+"Yesterday time format" = "Yesterday %@";
+"The screenshot could not be saved" = "The screenshot could not be saved";

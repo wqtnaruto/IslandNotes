@@ -10,12 +10,16 @@ The current milestone includes:
 - local multi-page Markdown notes with editable titles;
 - a Markdown editor that renders inactive lines while keeping the source editable;
 - a draggable file-reference shelf;
+- an application-native screenshot picker with a persistent five-item recent history;
 - a keep-awake switch;
 - Markdown editing shortcuts; and
 - an optional focus countdown and break reminder.
 
 The visual target for the dark theme is `Design/island-notes-top-tabs-v3.png`.
+The screenshot-history interaction is documented in `Design/island-notes-recent-screenshots-v1.png`.
 Workspace data remains in the existing IslandNotes Application Support directory.
+
+Use the camera button in the panel or press `Option-Command-2` to capture a region. Screenshots stay local and the oldest item is removed after the sixth successful capture.
 
 ## Run
 
