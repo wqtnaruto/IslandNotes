@@ -154,7 +154,9 @@ final class WorkspaceStore: ObservableObject {
             at: screenshotDirectoryURL,
             withIntermediateDirectories: true
         )
-        return screenshotDirectoryURL.appendingPathComponent(".capture-\(UUID().uuidString).png")
+        // `screencapture` refuses dot-prefixed destination names even when the
+        // directory is writable, so the in-progress file must remain visible.
+        return screenshotDirectoryURL.appendingPathComponent("capture-\(UUID().uuidString).png")
     }
 
     @discardableResult
