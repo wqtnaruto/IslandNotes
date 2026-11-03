@@ -217,8 +217,6 @@ final class TopEdgeActivationMonitor {
     private var activeDragTimer: Timer?
     private var isStarted = false
     private var isPanelVisible = false
-    private var requiresExitBeforeHover = false
-    private var lastHoverActivation = Date.distantPast
     private var cooldownUntil = Date.distantPast
     private var baselineDragChangeCount = 0
     private var inspectedDragChangeCount: Int?
@@ -227,7 +225,6 @@ final class TopEdgeActivationMonitor {
     var mode: ActivationMode = .click {
         didSet {
             guard oldValue != mode else { return }
-            requiresExitBeforeHover = false
             reconfigureMonitors()
         }
     }
@@ -256,8 +253,6 @@ final class TopEdgeActivationMonitor {
         isPanelVisible = visible
         if !visible {
             cooldownUntil = now.addingTimeInterval(0.45)
-            let activeScreens = screens ?? Self.currentScreenMetrics()
-            requiresExitBeforeHover = Self.isPointInTriggerZone(pointerLocation, screens: activeScreens)
             syncDragPasteboardBaselineIfIdle()
         }
         reconfigureMonitors()
@@ -300,33 +295,13 @@ final class TopEdgeActivationMonitor {
     }
 
     @discardableResult
-    func evaluateLiveHover(at point: NSPoint = NSEvent.mouseLocation, now: Date = Date()) -> Bool {
-        evaluateEvent(type: .mouseMoved, at: point, screens: Self.currentScreenMetrics(), now: now)
-    }
-
-    @discardableResult
     func evaluateEvent(type: NSEvent.EventType, at point: NSPoint, screens: [ScreenMetrics], now: Date = Date()) -> Bool {
         guard !isPanelVisible, mode != .menuBarOnly else { return false }
-
-        let inTrigger = Self.isPointInTriggerZone(point, screens: screens)
-        if !inTrigger {
-            if requiresExitBeforeHover {
-                requiresExitBeforeHover = false
-            }
-            return false
-        }
+        guard Self.isPointInTriggerZone(point, screens: screens) else { return false }
 
         switch mode {
         case .click:
             guard type == .leftMouseDown else { return false }
-            activate?()
-            return true
-        case .hover:
-            guard type == .mouseMoved,
-                  !requiresExitBeforeHover,
-                  now >= cooldownUntil,
-                  now.timeIntervalSince(lastHoverActivation) > 0.75 else { return false }
-            lastHoverActivation = now
             activate?()
             return true
         case .menuBarOnly:
@@ -359,10 +334,7 @@ final class TopEdgeActivationMonitor {
         removeMonitors()
         guard isStarted, !isPanelVisible else { return }
 
-        var mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
-        if mode == .hover {
-            mask.insert(.mouseMoved)
-        }
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             let eventType = event.type
@@ -402,8 +374,6 @@ final class TopEdgeActivationMonitor {
             activeDragTimer?.invalidate()
             activeDragTimer = nil
             syncDragPasteboardBaseline()
-        case .mouseMoved:
-            _ = evaluateEvent(type: .mouseMoved, at: point, screens: screens)
         default:
             break
         }

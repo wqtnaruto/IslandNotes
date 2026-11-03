@@ -6,7 +6,7 @@ The current milestone includes:
 
 - a notch-connected panel with an embedded tab rail, reduced-motion-aware expansion, and a pin switch;
 - dark, natural light, and system-following themes with Chinese interface text;
-- top-centre click, hover, or file-drag activation;
+- top-centre click or file-drag activation;
 - local multi-page Markdown notes with editable titles;
 - a Markdown editor that renders inactive lines while keeping the source editable;
 - a draggable file-reference shelf;

@@ -180,6 +180,11 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(preferences.themeMode, .dark)
         XCTAssertEqual(preferences.breakIntervalMinutes, 25)
         XCTAssertTrue(preferences.keepAwake)
+
+        // Legacy "hover" activation mode migrates cleanly to .click.
+        let legacyHover = #"{"activationMode":"hover","keepAwake":false}"#
+        let decodedHover = try JSONDecoder().decode(AppPreferences.self, from: Data(legacyHover.utf8))
+        XCTAssertEqual(decodedHover.activationMode, .click)
     }
 
     func testThemeAndMarkdownSurviveRoundTrip() {
@@ -365,7 +370,7 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: finalURL.path))
     }
 
-    func testActivationTriggerAdaptsToMenuBarHeightAndPreventsHoverBounceBack() {
+    func testActivationTriggerAdaptsToMenuBarHeightAndHandlesClickActivation() {
         let externalScreen = TopEdgeActivationMonitor.ScreenMetrics(
             frame: NSRect(x: 0, y: 0, width: 1920, height: 1080),
             visibleFrame: NSRect(x: 0, y: 0, width: 1920, height: 1056),
@@ -387,9 +392,9 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(notchedTrigger.height, 37)
         XCTAssertTrue(notchedTrigger.contains(NSPoint(x: 756, y: 950)))
 
-        // Hover bounce-back test: closing while cursor is inside trigger zone requires exiting first.
+        // Click activation test: .leftMouseDown within trigger activates; .mouseMoved is ignored so hover never opens panel.
         let monitor = TopEdgeActivationMonitor()
-        monitor.mode = .hover
+        monitor.mode = .click
         var activations = 0
         monitor.activate = { activations += 1 }
 
@@ -397,22 +402,22 @@ final class WorkspaceStoreTests: XCTestCase {
         let notchPoint = NSPoint(x: 756, y: 970)
         let outsidePoint = NSPoint(x: 756, y: 800)
 
-        XCTAssertTrue(monitor.evaluateEvent(type: .mouseMoved, at: notchPoint, screens: [notchedScreen], now: t0))
+        // Mouse moved does not trigger panel opening (hovering expands the notch card, but does not open the full panel).
+        XCTAssertFalse(monitor.evaluateEvent(type: .mouseMoved, at: notchPoint, screens: [notchedScreen], now: t0))
+        XCTAssertEqual(activations, 0)
+
+        // Left mouse click within notch trigger zone activates panel!
+        XCTAssertTrue(monitor.evaluateEvent(type: .leftMouseDown, at: notchPoint, screens: [notchedScreen], now: t0))
         XCTAssertEqual(activations, 1)
 
-        monitor.notifyPanelVisibilityChanged(true, pointerLocation: notchPoint, screens: [notchedScreen], now: t0)
-        // Panel closes while cursor is still on the top close chevron inside notchPoint:
-        let tClose = t0.addingTimeInterval(2.0)
-        monitor.notifyPanelVisibilityChanged(false, pointerLocation: notchPoint, screens: [notchedScreen], now: tClose)
-
-        // Moving inside trigger after cooldown still must NOT bounce back open until cursor leaves trigger zone.
-        XCTAssertFalse(monitor.evaluateEvent(type: .mouseMoved, at: notchPoint, screens: [notchedScreen], now: tClose.addingTimeInterval(1.0)))
+        // Left mouse click outside trigger zone does not activate.
+        XCTAssertFalse(monitor.evaluateEvent(type: .leftMouseDown, at: outsidePoint, screens: [notchedScreen], now: t0))
         XCTAssertEqual(activations, 1)
 
-        // Leaving trigger zone resets the exit requirement, allowing the next hover to activate.
-        XCTAssertFalse(monitor.evaluateEvent(type: .mouseMoved, at: outsidePoint, screens: [notchedScreen], now: tClose.addingTimeInterval(1.2)))
-        XCTAssertTrue(monitor.evaluateEvent(type: .mouseMoved, at: notchPoint, screens: [notchedScreen], now: tClose.addingTimeInterval(1.5)))
-        XCTAssertEqual(activations, 2)
+        // In .menuBarOnly mode, clicks at the notch are ignored.
+        monitor.mode = .menuBarOnly
+        XCTAssertFalse(monitor.evaluateEvent(type: .leftMouseDown, at: notchPoint, screens: [notchedScreen], now: t0))
+        XCTAssertEqual(activations, 1)
     }
 
     func testEditorIncrementalStylingIMEProtectionAndTrailingNewlineConceal() {

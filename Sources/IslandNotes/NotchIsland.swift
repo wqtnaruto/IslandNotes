@@ -1266,7 +1266,6 @@ final class NotchIslandCoordinator {
     private(set) var isVisible = false
 
     var onVisibilityChanged: ((Bool) -> Void)?
-    var onHoverInHoverActivationMode: (() -> Void)?
 
     init(
         store: WorkspaceStore,
@@ -1475,10 +1474,6 @@ final class NotchIslandCoordinator {
         if hovering {
             hoverExitDebounceTask?.cancel()
             hoverExitDebounceTask = nil
-            if store.preferences.activationMode == .hover {
-                onHoverInHoverActivationMode?()
-                return
-            }
             if !model.isPeeking {
                 model.isPeeking = true
                 syncInteractiveBounds()

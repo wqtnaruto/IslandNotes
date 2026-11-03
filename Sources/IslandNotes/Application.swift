@@ -753,9 +753,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notchIsland.onVisibilityChanged = { [weak self] visible in
             self?.reminder.setIslandVisible(visible)
         }
-        notchIsland.onHoverInHoverActivationMode = { [weak self] in
-            _ = self?.activationMonitor.evaluateLiveHover()
-        }
         reminder.onBreakTriggered = { [weak self] in
             self?.panel.show(activateApp: false)
         }

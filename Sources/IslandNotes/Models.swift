@@ -115,7 +115,6 @@ struct ScreenshotRecord: Codable, Equatable, Identifiable, Sendable {
 
 enum ActivationMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case click
-    case hover
     case menuBarOnly
 
     var id: String { rawValue }
@@ -123,8 +122,19 @@ enum ActivationMode: String, Codable, CaseIterable, Identifiable, Sendable {
     var label: String {
         switch self {
         case .click: "Click"
-        case .hover: "Hover"
         case .menuBarOnly: "Menu Bar Only"
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = (try? container.decode(String.self)) ?? ""
+        switch raw {
+        case Self.menuBarOnly.rawValue:
+            self = .menuBarOnly
+        default:
+            // Legacy `"hover"` or unknown values migrate cleanly to `.click`.
+            self = .click
         }
     }
 }
