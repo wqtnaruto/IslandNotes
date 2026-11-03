@@ -37,30 +37,51 @@ final class WorkspaceStore: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
 
         var shouldPersistMigration = false
-        if let data = try? Data(contentsOf: self.storageURL),
-           var decoded = try? decoder.decode(PersistedWorkspace.self, from: data),
-           !decoded.notes.isEmpty,
-           decoded.notes.contains(where: { $0.id == decoded.activeNoteID }) {
-            shouldPersistMigration = decoded.migrateLegacyEnglishStarterContent()
-            let validScreenshots = decoded.screenshots
-                .prefix(5)
-                .filter { record in
-                    record.fileName == URL(fileURLWithPath: record.fileName).lastPathComponent &&
-                        FileManager.default.fileExists(
-                            atPath: resolvedScreenshotDirectory.appendingPathComponent(record.fileName).path
-                        )
+        var initialError: String?
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: self.storageURL.path, isDirectory: &isDirectory)
+
+        if exists, !isDirectory.boolValue, let data = try? Data(contentsOf: self.storageURL), !data.isEmpty {
+            if var decoded = try? decoder.decode(PersistedWorkspace.self, from: data),
+               !decoded.notes.isEmpty {
+                if !decoded.notes.contains(where: { $0.id == decoded.activeNoteID }) {
+                    decoded.activeNoteID = decoded.notes[0].id
+                    shouldPersistMigration = true
                 }
-            if Array(validScreenshots) != decoded.screenshots {
-                decoded.screenshots = Array(validScreenshots)
-                shouldPersistMigration = true
+                if decoded.migrateLegacyEnglishStarterContent() {
+                    shouldPersistMigration = true
+                }
+                let validScreenshots = decoded.screenshots
+                    .prefix(5)
+                    .filter { record in
+                        record.fileName == URL(fileURLWithPath: record.fileName).lastPathComponent &&
+                            FileManager.default.fileExists(
+                                atPath: resolvedScreenshotDirectory.appendingPathComponent(record.fileName).path
+                            )
+                    }
+                if Array(validScreenshots) != decoded.screenshots {
+                    decoded.screenshots = Array(validScreenshots)
+                    shouldPersistMigration = true
+                }
+                self.workspace = decoded
+            } else {
+                Self.backupCorruptedWorkspace(at: self.storageURL)
+                self.workspace = .fresh()
+                initialError = L10n.string("Workspace file could not be read and was backed up")
             }
-            self.workspace = decoded
         } else {
             self.workspace = .fresh()
         }
+
+        Self.cleanupOrphanedScreenshots(
+            in: resolvedScreenshotDirectory,
+            keeping: Set(self.workspace.screenshots.map(\.fileName))
+        )
         warmShelfCache(for: self.workspace.shelf)
         if shouldPersistMigration {
             save()
+        } else if let initialError {
+            self.lastSaveError = initialError
         }
     }
 
@@ -72,6 +93,10 @@ final class WorkspaceStore: ObservableObject {
 
     var activeNote: NotePage {
         workspace.notes.first(where: { $0.id == workspace.activeNoteID }) ?? workspace.notes[0]
+    }
+
+    var activeNoteTaskOverview: MarkdownPresentation.NoteTaskOverview {
+        MarkdownPresentation.taskOverview(in: activeNote.markdown)
     }
 
     func selectNote(_ id: UUID) {
@@ -127,17 +152,43 @@ final class WorkspaceStore: ObservableObject {
         scheduleSave(delayNanoseconds: 350_000_000)
     }
 
-    func addShelfURLs(_ urls: [URL]) {
-        var knownPaths = Set(workspace.shelf.map(\.originalPath))
+    @discardableResult
+    func completeTask(atStateLocation stateLocation: Int, in noteID: UUID, now: Date = Date()) -> Bool {
+        guard let index = workspace.notes.firstIndex(where: { $0.id == noteID }) else { return false }
+        let raw = workspace.notes[index].markdown
+        let source = raw as NSString
+        guard stateLocation >= 0,
+              stateLocation < source.length,
+              let toggle = MarkdownPresentation.taskToggle(in: raw, at: stateLocation),
+              toggle.range.location == stateLocation,
+              toggle.replacement == "x" else {
+            return false
+        }
+        var updatedNote = workspace.notes[index]
+        updatedNote.markdown = source.replacingCharacters(in: toggle.range, with: "x")
+        updatedNote.updatedAt = now
+        workspace.notes[index] = updatedNote
+        save()
+        return true
+    }
+
+    @discardableResult
+    func addShelfURLs(_ urls: [URL]) -> [UUID] {
+        var knownPaths = Set(workspace.shelf.map {
+            (shelfURLCache[$0.id] ?? URL(fileURLWithPath: $0.originalPath)).standardizedFileURL.path
+        })
         var additions: [ShelfReference] = []
-        for url in urls where knownPaths.insert(url.path).inserted {
+        for rawURL in urls where rawURL.isFileURL {
+            let url = rawURL.standardizedFileURL
+            guard knownPaths.insert(url.path).inserted else { continue }
             let reference = ShelfReference(url: url)
             shelfURLCache[reference.id] = url
             additions.append(reference)
         }
-        guard !additions.isEmpty else { return }
+        guard !additions.isEmpty else { return [] }
         workspace.shelf.append(contentsOf: additions)
         save()
+        return additions.map(\.id)
     }
 
     func removeShelfItem(_ id: UUID) {
@@ -154,9 +205,7 @@ final class WorkspaceStore: ObservableObject {
             at: screenshotDirectoryURL,
             withIntermediateDirectories: true
         )
-        // `screencapture` refuses dot-prefixed destination names even when the
-        // directory is writable, so the in-progress file must remain visible.
-        return screenshotDirectoryURL.appendingPathComponent("capture-\(UUID().uuidString).png")
+        return screenshotDirectoryURL.appendingPathComponent(".capture-\(UUID().uuidString).png")
     }
 
     @discardableResult
@@ -190,10 +239,7 @@ final class WorkspaceStore: ObservableObject {
         let removed = Array(updated.screenshots.dropFirst(5))
         updated.screenshots = Array(updated.screenshots.prefix(5))
 
-        pendingSaveTask?.cancel()
-        pendingSaveTask = nil
-        saveGeneration &+= 1
-        if let message = Self.writeSnapshot(updated, to: storageURL) {
+        if let message = writeSnapshotSerialized(updated) {
             try? FileManager.default.removeItem(at: destination)
             updateSaveError(message)
             throw ScreenshotStoreError.persistence(message)
@@ -221,10 +267,7 @@ final class WorkspaceStore: ObservableObject {
         var updated = workspace
         updated.screenshots.removeAll { $0.id == id }
 
-        pendingSaveTask?.cancel()
-        pendingSaveTask = nil
-        saveGeneration &+= 1
-        if let message = Self.writeSnapshot(updated, to: storageURL) {
+        if let message = writeSnapshotSerialized(updated) {
             updateSaveError(message)
             return
         }
@@ -246,11 +289,25 @@ final class WorkspaceStore: ObservableObject {
         return URL(fileURLWithPath: item.originalPath)
     }
 
-    /// Resolves bookmark on user action (open / reveal in Finder) and updates the cache.
+    /// Resolves bookmark on user action (open / reveal in Finder) and updates stale bookmark metadata.
     func resolveShelfURL(for item: ShelfReference) -> URL? {
-        if let resolved = item.resolvedURL() {
-            shelfURLCache[item.id] = resolved
-            return resolved
+        if let resolution = item.resolveBookmark() {
+            shelfURLCache[item.id] = resolution.url
+            if (resolution.isStale || resolution.url.path != item.originalPath),
+               let index = workspace.shelf.firstIndex(where: { $0.id == item.id }) {
+                var refreshed = workspace.shelf[index]
+                refreshed.displayName = resolution.url.lastPathComponent
+                refreshed.originalPath = resolution.url.path
+                refreshed.fileSizeBytes = ShelfReference.readFileSize(for: resolution.url)
+                if let newBookmark = ShelfReference.makeBookmark(for: resolution.url) {
+                    refreshed.bookmark = newBookmark
+                }
+                if refreshed != workspace.shelf[index] {
+                    workspace.shelf[index] = refreshed
+                    scheduleSave(delayNanoseconds: 150_000_000)
+                }
+            }
+            return resolution.url
         }
         return shelfURLCache[item.id]
     }
@@ -264,15 +321,18 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func save() {
+        let errorMessage = writeSnapshotSerialized(workspace)
+        updateSaveError(errorMessage)
+    }
+
+    private func writeSnapshotSerialized(_ snapshot: PersistedWorkspace) -> String? {
         pendingSaveTask?.cancel()
         pendingSaveTask = nil
         saveGeneration &+= 1
-        let snapshot = workspace
         let destination = storageURL
-        let errorMessage = ioQueue.sync {
+        return ioQueue.sync {
             Self.writeSnapshot(snapshot, to: destination)
         }
-        updateSaveError(errorMessage)
     }
 
     private func scheduleSave(delayNanoseconds: UInt64) {
@@ -327,6 +387,32 @@ final class WorkspaceStore: ObservableObject {
                 for item in unresolved {
                     self.resolvingShelfIDs.remove(item.id)
                 }
+            }
+        }
+    }
+
+    nonisolated private static func backupCorruptedWorkspace(at storageURL: URL) {
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let backupURL = storageURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("workspace.corrupt-\(timestamp).json")
+        try? FileManager.default.removeItem(at: backupURL)
+        try? FileManager.default.copyItem(at: storageURL, to: backupURL)
+    }
+
+    nonisolated private static func cleanupOrphanedScreenshots(in directoryURL: URL, keeping validFileNames: Set<String>) {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil
+        ) else { return }
+        for url in urls {
+            let name = url.lastPathComponent
+            if name.hasPrefix(".capture-"), name.hasSuffix(".png") {
+                try? FileManager.default.removeItem(at: url)
+            } else if name.hasSuffix(".png"),
+                      !validFileNames.contains(name),
+                      UUID(uuidString: String(name.dropLast(4))) != nil {
+                try? FileManager.default.removeItem(at: url)
             }
         }
     }

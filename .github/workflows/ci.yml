@@ -18,4 +18,4 @@ jobs:
         run: |
           codesign --verify --deep --strict dist.noindex/IslandNotes.app
           plutil -lint dist.noindex/IslandNotes.app/Contents/Info.plist
-          shasum -a 256 -c dist.noindex/IslandNotes.zip.sha256
+          (cd dist.noindex && shasum -a 256 -c IslandNotes.zip.sha256)

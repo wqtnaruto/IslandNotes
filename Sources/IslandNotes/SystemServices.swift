@@ -7,10 +7,20 @@ final class KeepAwakeController {
 
     func setEnabled(_ enabled: Bool) {
         if enabled {
-            guard process == nil else { return }
+            if let process, process.isRunning {
+                return
+            }
+            process = nil
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-            task.arguments = ["-dimsu"]
+            task.arguments = ["-dimsu", "-w", "\(ProcessInfo.processInfo.processIdentifier)"]
+            task.terminationHandler = { [weak self] finished in
+                Task { @MainActor [weak self] in
+                    if self?.process === finished {
+                        self?.process = nil
+                    }
+                }
+            }
             do {
                 try task.run()
                 process = task
@@ -18,12 +28,18 @@ final class KeepAwakeController {
                 process = nil
             }
         } else {
-            process?.terminate()
+            if let process, process.isRunning {
+                process.terminate()
+            }
             process = nil
         }
     }
 
-    deinit { process?.terminate() }
+    deinit {
+        if let process, process.isRunning {
+            process.terminate()
+        }
+    }
 }
 
 @MainActor
@@ -33,10 +49,36 @@ final class BreakReminder: ObservableObject {
     @Published private(set) var remainingMinutes: Int = 0
     @Published private(set) var progress: Double = 0
 
+    var onBreakTriggered: (() -> Void)?
+
     private var deadlineTimer: Timer?
     private var uiTimer: Timer?
+    private var wakeObserver: NSObjectProtocol?
     private var interval: TimeInterval = 0
     private var isPanelVisible = false
+    private var isIslandVisible = false
+
+    var isUIRefreshTimerActive: Bool { uiTimer?.isValid == true }
+
+    init() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleSystemWake(now: Date())
+            }
+        }
+    }
+
+    deinit {
+        deadlineTimer?.invalidate()
+        uiTimer?.invalidate()
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+    }
 
     func configure(enabled: Bool, intervalMinutes: Int) {
         let requestedInterval = TimeInterval(max(1, intervalMinutes) * 60)
@@ -67,6 +109,15 @@ final class BreakReminder: ObservableObject {
         updateUITimer()
     }
 
+    func setIslandVisible(_ visible: Bool) {
+        guard isIslandVisible != visible else { return }
+        isIslandVisible = visible
+        if visible, nextBreakAt != nil {
+            refresh(now: Date())
+        }
+        updateUITimer()
+    }
+
     func refresh(now: Date) {
         guard let nextBreakAt, interval > 0 else {
             if remainingMinutes != 0 { remainingMinutes = 0 }
@@ -90,6 +141,30 @@ final class BreakReminder: ObservableObject {
         if message != nil { message = nil }
     }
 
+    /// Re-synchronizes monotonic `Timer` scheduling with wall-clock `nextBreakAt` after macOS sleep.
+    func handleSystemWake(now: Date = Date()) {
+        guard let deadline = nextBreakAt, interval > 0 else { return }
+        if now >= deadline {
+            nextBreakAt = now.addingTimeInterval(interval)
+        }
+        refresh(now: now)
+        scheduleDeadlineTimer(now: now)
+    }
+
+    func triggerIfDue(now: Date = Date(), playSound: Bool = true) {
+        guard let deadline = nextBreakAt else { return }
+        if now >= deadline {
+            message = L10n.string("Time to stand up, stretch, and look away from the screen.")
+            nextBreakAt = now.addingTimeInterval(interval)
+            if playSound {
+                NSSound.beep()
+            }
+            onBreakTriggered?()
+        }
+        refresh(now: now)
+        scheduleDeadlineTimer(now: now)
+    }
+
     private func scheduleDeadlineTimer(now: Date) {
         deadlineTimer?.invalidate()
         deadlineTimer = nil
@@ -97,39 +172,28 @@ final class BreakReminder: ObservableObject {
         let delay = max(0.05, nextBreakAt.timeIntervalSince(now))
         let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             if Thread.isMainThread {
-                MainActor.assumeIsolated { self?.handleDeadlineReached() }
+                MainActor.assumeIsolated { self?.triggerIfDue(now: Date()) }
             } else {
-                Task { @MainActor [weak self] in self?.handleDeadlineReached() }
+                Task { @MainActor [weak self] in self?.triggerIfDue(now: Date()) }
             }
         }
         timer.tolerance = min(0.5, delay * 0.05)
         deadlineTimer = timer
     }
 
-    private func handleDeadlineReached() {
-        let now = Date()
-        guard let deadline = nextBreakAt else { return }
-        if now >= deadline {
-            message = L10n.string("Time to stand up, stretch, and look away from the screen.")
-            nextBreakAt = now.addingTimeInterval(interval)
-            NSSound.beep()
-        }
-        refresh(now: now)
-        scheduleDeadlineTimer(now: now)
-    }
-
     private func updateUITimer() {
         uiTimer?.invalidate()
         uiTimer = nil
-        guard isPanelVisible, nextBreakAt != nil, interval > 0 else { return }
-        let timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        guard (isPanelVisible || isIslandVisible), nextBreakAt != nil, interval > 0 else { return }
+        let refreshInterval: TimeInterval = isPanelVisible ? 5 : 10
+        let timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             if Thread.isMainThread {
                 MainActor.assumeIsolated { self?.refresh(now: Date()) }
             } else {
                 Task { @MainActor [weak self] in self?.refresh(now: Date()) }
             }
         }
-        timer.tolerance = 1.0
+        timer.tolerance = isPanelVisible ? 1.0 : 2.5
         uiTimer = timer
     }
 
@@ -150,11 +214,15 @@ final class TopEdgeActivationMonitor {
     }
 
     private var globalMonitor: Any?
+    private var activeDragTimer: Timer?
     private var isStarted = false
     private var isPanelVisible = false
     private var requiresExitBeforeHover = false
     private var lastHoverActivation = Date.distantPast
     private var cooldownUntil = Date.distantPast
+    private var baselineDragChangeCount = 0
+    private var inspectedDragChangeCount: Int?
+    private var inspectedDragHasFiles = false
 
     var mode: ActivationMode = .click {
         didSet {
@@ -165,9 +233,11 @@ final class TopEdgeActivationMonitor {
     }
 
     var activate: (() -> Void)?
+    var activateForFileDrag: (() -> Void)?
 
     func start() {
         isStarted = true
+        syncDragPasteboardBaselineIfIdle()
         reconfigureMonitors()
     }
 
@@ -176,13 +246,19 @@ final class TopEdgeActivationMonitor {
         removeMonitors()
     }
 
-    func notifyPanelVisibilityChanged(_ visible: Bool, pointerLocation: NSPoint = NSEvent.mouseLocation, screens: [ScreenMetrics]? = nil, now: Date = Date()) {
+    func notifyPanelVisibilityChanged(
+        _ visible: Bool,
+        pointerLocation: NSPoint = NSEvent.mouseLocation,
+        screens: [ScreenMetrics]? = nil,
+        now: Date = Date()
+    ) {
         guard isPanelVisible != visible else { return }
         isPanelVisible = visible
         if !visible {
             cooldownUntil = now.addingTimeInterval(0.45)
             let activeScreens = screens ?? Self.currentScreenMetrics()
             requiresExitBeforeHover = Self.isPointInTriggerZone(pointerLocation, screens: activeScreens)
+            syncDragPasteboardBaselineIfIdle()
         }
         reconfigureMonitors()
     }
@@ -198,11 +274,34 @@ final class TopEdgeActivationMonitor {
         )
     }
 
+    static func fileDragTriggerRect(for screen: ScreenMetrics) -> NSRect {
+        let menuBarOcclusion = screen.frame.maxY - screen.visibleFrame.maxY
+        let height = min(64, max(38, max(screen.safeAreaTop, menuBarOcclusion) + 14))
+        return NSRect(
+            x: screen.frame.midX - 140,
+            y: screen.frame.maxY - height,
+            width: 280,
+            height: height
+        )
+    }
+
     static func isPointInTriggerZone(_ point: NSPoint, screens: [ScreenMetrics]) -> Bool {
         guard let screen = screens.first(where: { NSMouseInRect(point, $0.frame, false) }) else {
             return false
         }
         return triggerRect(for: screen).contains(point)
+    }
+
+    static func isPointInFileDragTriggerZone(_ point: NSPoint, screens: [ScreenMetrics]) -> Bool {
+        guard let screen = screens.first(where: { NSMouseInRect(point, $0.frame, false) }) else {
+            return false
+        }
+        return fileDragTriggerRect(for: screen).contains(point)
+    }
+
+    @discardableResult
+    func evaluateLiveHover(at point: NSPoint = NSEvent.mouseLocation, now: Date = Date()) -> Bool {
+        evaluateEvent(type: .mouseMoved, at: point, screens: Self.currentScreenMetrics(), now: now)
     }
 
     @discardableResult
@@ -235,18 +334,34 @@ final class TopEdgeActivationMonitor {
         }
     }
 
+    @discardableResult
+    func evaluateFileDrag(
+        at point: NSPoint,
+        screens: [ScreenMetrics],
+        hasDraggedFiles: Bool,
+        now: Date = Date()
+    ) -> Bool {
+        guard !isPanelVisible,
+              hasDraggedFiles,
+              now >= cooldownUntil,
+              Self.isPointInFileDragTriggerZone(point, screens: screens) else {
+            return false
+        }
+        if let activateForFileDrag {
+            activateForFileDrag()
+        } else {
+            activate?()
+        }
+        return true
+    }
+
     private func reconfigureMonitors() {
         removeMonitors()
         guard isStarted, !isPanelVisible else { return }
 
-        let mask: NSEvent.EventTypeMask
-        switch mode {
-        case .click:
-            mask = [.leftMouseDown]
-        case .hover:
-            mask = [.mouseMoved]
-        case .menuBarOnly:
-            return
+        var mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        if mode == .hover {
+            mask.insert(.mouseMoved)
         }
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
@@ -264,6 +379,8 @@ final class TopEdgeActivationMonitor {
     }
 
     private func removeMonitors() {
+        activeDragTimer?.invalidate()
+        activeDragTimer = nil
         if let globalMonitor {
             NSEvent.removeMonitor(globalMonitor)
             self.globalMonitor = nil
@@ -272,7 +389,81 @@ final class TopEdgeActivationMonitor {
 
     private func handleLiveEvent(type: NSEvent.EventType) {
         let point = NSEvent.mouseLocation
-        evaluateEvent(type: type, at: point, screens: Self.currentScreenMetrics())
+        let screens = Self.currentScreenMetrics()
+
+        switch type {
+        case .leftMouseDown:
+            if !evaluateEvent(type: .leftMouseDown, at: point, screens: screens) {
+                startDragWatchTimer()
+            }
+        case .leftMouseDragged:
+            checkActiveFileDrag(at: point, screens: screens)
+        case .leftMouseUp:
+            activeDragTimer?.invalidate()
+            activeDragTimer = nil
+            syncDragPasteboardBaseline()
+        case .mouseMoved:
+            _ = evaluateEvent(type: .mouseMoved, at: point, screens: screens)
+        default:
+            break
+        }
+    }
+
+    /// CoreDrag (e.g. Finder file drag loop) does not always emit global `.leftMouseDragged`
+    /// NSEvents after `.leftMouseDown`, so a low-frequency timer runs strictly while the left
+    /// mouse button remains pressed and stops immediately upon release.
+    private func startDragWatchTimer() {
+        guard activeDragTimer == nil, !isPanelVisible else { return }
+        let timer = Timer(timeInterval: 0.06, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard !self.isPanelVisible, (NSEvent.pressedMouseButtons & 1) != 0 else {
+                    self.activeDragTimer?.invalidate()
+                    self.activeDragTimer = nil
+                    if (NSEvent.pressedMouseButtons & 1) == 0 {
+                        self.syncDragPasteboardBaseline()
+                    }
+                    return
+                }
+                self.checkActiveFileDrag(at: NSEvent.mouseLocation, screens: Self.currentScreenMetrics())
+            }
+        }
+        timer.tolerance = 0.02
+        RunLoop.main.add(timer, forMode: .common)
+        activeDragTimer = timer
+    }
+
+    private func checkActiveFileDrag(at point: NSPoint, screens: [ScreenMetrics]) {
+        guard !isPanelVisible, (NSEvent.pressedMouseButtons & 1) != 0 else { return }
+        let hasFiles = currentSessionHasDraggedFiles()
+        _ = evaluateFileDrag(at: point, screens: screens, hasDraggedFiles: hasFiles)
+    }
+
+    private func currentSessionHasDraggedFiles() -> Bool {
+        let pasteboard = NSPasteboard(name: .drag)
+        let currentCount = pasteboard.changeCount
+        guard currentCount != baselineDragChangeCount else { return false }
+        if inspectedDragChangeCount == currentCount {
+            return inspectedDragHasFiles
+        }
+        inspectedDragChangeCount = currentCount
+        inspectedDragHasFiles = pasteboard.canReadObject(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        )
+        return inspectedDragHasFiles
+    }
+
+    private func syncDragPasteboardBaselineIfIdle() {
+        if (NSEvent.pressedMouseButtons & 1) == 0 {
+            syncDragPasteboardBaseline()
+        }
+    }
+
+    private func syncDragPasteboardBaseline() {
+        baselineDragChangeCount = NSPasteboard(name: .drag).changeCount
+        inspectedDragChangeCount = nil
+        inspectedDragHasFiles = false
     }
 
     private static func currentScreenMetrics() -> [ScreenMetrics] {

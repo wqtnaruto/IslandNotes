@@ -12,6 +12,7 @@ APP_DIR=${OUTPUT_DIR}/${PRODUCT_NAME}.app
 CONTENTS_DIR=${APP_DIR}/Contents
 
 cd "${PROJECT_DIR}"
+rm -rf ".build/release/IslandNotes_IslandNotes.bundle"
 swift build -c release --disable-sandbox
 
 rm -rf "${APP_DIR}"
@@ -35,14 +36,22 @@ fi
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${CONTENTS_DIR}/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "${CONTENTS_DIR}/Info.plist"
 
+NESTED_BUNDLE="${CONTENTS_DIR}/Resources/IslandNotes_IslandNotes.bundle"
 if [[ -n "${SIGN_IDENTITY:-}" ]]; then
-  codesign --force --deep --options runtime --sign "${SIGN_IDENTITY}" "${APP_DIR}"
+  if [[ -d "${NESTED_BUNDLE}" ]]; then
+    codesign --force --sign "${SIGN_IDENTITY}" "${NESTED_BUNDLE}"
+  fi
+  codesign --force --options runtime --sign "${SIGN_IDENTITY}" "${APP_DIR}"
 else
-  codesign --force --deep --sign - "${APP_DIR}"
+  if [[ -d "${NESTED_BUNDLE}" ]]; then
+    codesign --force --sign - "${NESTED_BUNDLE}"
+  fi
+  codesign --force --sign - "${APP_DIR}"
 fi
 
+rm -f "${OUTPUT_DIR}/${PRODUCT_NAME}.zip" "${OUTPUT_DIR}/${PRODUCT_NAME}.zip.sha256"
 ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${OUTPUT_DIR}/${PRODUCT_NAME}.zip"
-shasum -a 256 "${OUTPUT_DIR}/${PRODUCT_NAME}.zip" > "${OUTPUT_DIR}/${PRODUCT_NAME}.zip.sha256"
+(cd "${OUTPUT_DIR}" && shasum -a 256 "${PRODUCT_NAME}.zip" > "${PRODUCT_NAME}.zip.sha256")
 
 echo "Created ${APP_DIR}"
 echo "Created ${OUTPUT_DIR}/${PRODUCT_NAME}.zip"

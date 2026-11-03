@@ -23,16 +23,34 @@ struct NotePage: Codable, Equatable, Identifiable, Sendable {
 }
 
 struct ShelfReference: Codable, Equatable, Identifiable, Sendable {
+    struct BookmarkResolution: Sendable {
+        let url: URL
+        let isStale: Bool
+    }
+
     let id: UUID
     var displayName: String
     var originalPath: String
     var bookmark: Data?
+    var fileSizeBytes: Int64?
 
     init(id: UUID = UUID(), url: URL) {
         self.id = id
         self.displayName = url.lastPathComponent
         self.originalPath = url.path
-        self.bookmark = (try? url.bookmarkData(
+        self.bookmark = Self.makeBookmark(for: url)
+        self.fileSizeBytes = Self.readFileSize(for: url)
+    }
+
+    static func readFileSize(for url: URL) -> Int64? {
+        guard !url.hasDirectoryPath,
+              let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+              let fileSize = values.fileSize else { return nil }
+        return Int64(fileSize)
+    }
+
+    static func makeBookmark(for url: URL) -> Data? {
+        (try? url.bookmarkData(
             options: [.withSecurityScope],
             includingResourceValuesForKeys: nil,
             relativeTo: nil
@@ -43,7 +61,7 @@ struct ShelfReference: Codable, Equatable, Identifiable, Sendable {
         ))
     }
 
-    func resolvedURL() -> URL? {
+    func resolveBookmark() -> BookmarkResolution? {
         if let bookmark {
             var stale = false
             if let resolved = try? URL(
@@ -52,19 +70,24 @@ struct ShelfReference: Codable, Equatable, Identifiable, Sendable {
                 relativeTo: nil,
                 bookmarkDataIsStale: &stale
             ) {
-                return resolved
+                return BookmarkResolution(url: resolved, isStale: stale)
             }
+            stale = false
             if let resolved = try? URL(
                 resolvingBookmarkData: bookmark,
                 options: [.withoutUI],
                 relativeTo: nil,
                 bookmarkDataIsStale: &stale
             ) {
-                return resolved
+                return BookmarkResolution(url: resolved, isStale: stale)
             }
         }
         guard !originalPath.isEmpty else { return nil }
-        return URL(fileURLWithPath: originalPath)
+        return BookmarkResolution(url: URL(fileURLWithPath: originalPath), isStale: false)
+    }
+
+    func resolvedURL() -> URL? {
+        resolveBookmark()?.url
     }
 }
 
@@ -117,9 +140,10 @@ struct AppPreferences: Codable, Equatable, Sendable {
     var breakReminderEnabled = false
     var breakIntervalMinutes = 45
     var themeMode: ThemeMode = .dark
+    var notchIslandEnabled = true
 
     enum CodingKeys: String, CodingKey {
-        case activationMode, keepAwake, breakReminderEnabled, breakIntervalMinutes, themeMode
+        case activationMode, keepAwake, breakReminderEnabled, breakIntervalMinutes, themeMode, notchIslandEnabled
     }
 
     init() {}
@@ -131,6 +155,7 @@ struct AppPreferences: Codable, Equatable, Sendable {
         breakReminderEnabled = try values.decodeIfPresent(Bool.self, forKey: .breakReminderEnabled) ?? false
         breakIntervalMinutes = try values.decodeIfPresent(Int.self, forKey: .breakIntervalMinutes) ?? 45
         themeMode = try values.decodeIfPresent(ThemeMode.self, forKey: .themeMode) ?? .dark
+        notchIslandEnabled = try values.decodeIfPresent(Bool.self, forKey: .notchIslandEnabled) ?? true
     }
 }
 

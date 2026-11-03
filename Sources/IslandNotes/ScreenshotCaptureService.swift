@@ -30,48 +30,71 @@ protocol ScreenshotCapturing: Sendable {
     func capture(to destination: URL) async throws -> ScreenshotCaptureResult
 }
 
+private final class CancellableProcessBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancelled = false
+
+    func attach(_ process: Process) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if cancelled {
+            return false
+        }
+        self.process = process
+        return true
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let active = process
+        lock.unlock()
+        if let active, active.isRunning {
+            active.terminate()
+        }
+    }
+}
+
 struct SystemScreenshotCaptureService: ScreenshotCapturing {
     func capture(to destination: URL) async throws -> ScreenshotCaptureResult {
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            let errors = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-            // Force region selection instead of inheriting the user's last
-            // window/toolbar mode. Ask macOS to surface genuine capture errors.
-            process.arguments = ["-i", "-s", "-x", "-d", "-t", "png", destination.path]
-            process.standardError = errors
-            process.terminationHandler = { process in
-                guard FileManager.default.fileExists(atPath: destination.path) else {
-                    let errorText = String(
-                        data: errors.fileHandleForReading.readDataToEndOfFile(),
-                        encoding: .utf8
-                    )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    if process.terminationStatus == 1, errorText.isEmpty {
-                        continuation.resume(returning: .cancelled)
-                    } else {
-                        continuation.resume(throwing: ScreenshotCaptureError.launchFailed(
-                            errorText.isEmpty ? L10n.string("The screenshot could not be saved") : errorText
-                        ))
-                    }
-                    return
-                }
-                guard process.terminationStatus == 0,
-                      let dimensions = Self.pixelDimensions(at: destination) else {
-                    continuation.resume(throwing: ScreenshotCaptureError.invalidImage)
-                    return
-                }
-                continuation.resume(returning: .captured(CapturedScreenshot(
-                    url: destination,
-                    pixelWidth: dimensions.width,
-                    pixelHeight: dimensions.height
-                )))
-            }
+        let box = CancellableProcessBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                process.arguments = ["-i", "-x", "-t", "png", destination.path]
 
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: ScreenshotCaptureError.launchFailed(error.localizedDescription))
+                guard box.attach(process) else {
+                    continuation.resume(returning: .cancelled)
+                    return
+                }
+
+                process.terminationHandler = { process in
+                    guard FileManager.default.fileExists(atPath: destination.path) else {
+                        continuation.resume(returning: .cancelled)
+                        return
+                    }
+                    guard process.terminationStatus == 0,
+                          let dimensions = Self.pixelDimensions(at: destination) else {
+                        continuation.resume(throwing: ScreenshotCaptureError.invalidImage)
+                        return
+                    }
+                    continuation.resume(returning: .captured(CapturedScreenshot(
+                        url: destination,
+                        pixelWidth: dimensions.width,
+                        pixelHeight: dimensions.height
+                    )))
+                }
+
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(throwing: ScreenshotCaptureError.launchFailed(error.localizedDescription))
+                }
             }
+        } onCancel: {
+            box.cancel()
         }
     }
 

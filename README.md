@@ -4,16 +4,17 @@ An independent macOS menu-bar notebook built around a compact top-centre panel.
 
 The current milestone includes:
 
-- a notch-connected panel with an embedded tab rail and reduced-motion-aware expansion;
-- dark, natural light, and system-following themes with Chinese and English interface text;
-- top-centre click or hover activation;
+- a notch-connected panel with an embedded tab rail, reduced-motion-aware expansion, and a pin switch;
+- dark, natural light, and system-following themes with Chinese interface text;
+- top-centre click, hover, or file-drag activation;
 - local multi-page Markdown notes with editable titles;
 - a Markdown editor that renders inactive lines while keeping the source editable;
 - a draggable file-reference shelf;
 - an application-native screenshot picker with a persistent five-item recent history;
 - a keep-awake switch;
-- Markdown editing shortcuts; and
-- an optional focus countdown and break reminder.
+- Markdown editing shortcuts (`Command-B`, `Command-I`, `Command-E`, `Command-K`, `Shift-Command-H`, `Shift-Command-L`);
+- an optional focus countdown and break reminder that automatically reveals the panel when due; and
+- a collapsed notch island capsule with a 2pt focus/keep-awake rim, compact countdown, pinned first-unchecked-task display, hover micro-expansion, and one-click task completion.
 
 The visual target for the dark theme is `Design/island-notes-top-tabs-v3.png`.
 The screenshot-history interaction is documented in `Design/island-notes-recent-screenshots-v1.png`.

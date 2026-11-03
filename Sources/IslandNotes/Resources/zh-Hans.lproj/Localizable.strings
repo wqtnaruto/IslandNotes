@@ -27,6 +27,10 @@
 "Link" = "链接";
 "Task" = "任务";
 "Drop files here" = "拖入参考文件";
+"Reference files" = "参考文件";
+"Drag out to send" = "拖出即可发送";
+"Folder" = "文件夹";
+"File" = "文件";
 "Open" = "打开";
 "Show in Finder" = "在访达中显示";
 "Remove" = "移除";
@@ -46,3 +50,15 @@
 "Minutes ago format" = "%d 分钟前";
 "Yesterday time format" = "昨天 %@";
 "The screenshot could not be saved" = "截图无法保存";
+"Pin panel" = "固定面板";
+"Unpin panel" = "取消固定";
+"Workspace file could not be read and was backed up" = "原笔记数据读取异常，已自动备份原文件";
+"Editor placeholder" = "开始记录想法、待办或重点…";
+"Code" = "代码";
+"Notch island" = "灵动岛状态";
+"Awake" = "常亮";
+"Keep Mac awake active" = "保持唤醒已开启";
+"Complete task" = "完成待办";
+"Open notes" = "展开笔记";
+"Compact minutes format" = "%d分钟";
+"Focus remaining format" = "专注剩余 %d 分钟";

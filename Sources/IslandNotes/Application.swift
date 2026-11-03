@@ -6,8 +6,15 @@ import SwiftUI
 struct PanelSafeLayout: Equatable, Sendable {
     let notchHeight: CGFloat
     let notchWidth: CGFloat
+    let availableLeftWidth: CGFloat
+    let availableRightWidth: CGFloat
 
-    init(safeAreaTop: CGFloat, notchWidth: CGFloat? = nil) {
+    init(
+        safeAreaTop: CGFloat,
+        notchWidth: CGFloat? = nil,
+        availableLeftWidth: CGFloat = 600,
+        availableRightWidth: CGFloat = 600
+    ) {
         let height = round(max(0, safeAreaTop))
         self.notchHeight = height
         if let notchWidth {
@@ -15,6 +22,8 @@ struct PanelSafeLayout: Equatable, Sendable {
         } else {
             self.notchWidth = height > 0 ? 210 : 0
         }
+        self.availableLeftWidth = max(56, round(availableLeftWidth))
+        self.availableRightWidth = max(76, round(availableRightWidth))
     }
 
     @MainActor
@@ -24,12 +33,23 @@ struct PanelSafeLayout: Equatable, Sendable {
             return
         }
         let measuredWidth: CGFloat?
+        let leftSpace: CGFloat
+        let rightSpace: CGFloat
         if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
             measuredWidth = max(0, right.minX - left.maxX)
+            leftSpace = max(56, left.width - 140)
+            rightSpace = max(76, right.width - 140)
         } else {
             measuredWidth = nil
+            leftSpace = max(56, screen.frame.width / 2 - 220)
+            rightSpace = max(76, screen.frame.width / 2 - 220)
         }
-        self.init(safeAreaTop: screen.safeAreaInsets.top, notchWidth: measuredWidth)
+        self.init(
+            safeAreaTop: screen.safeAreaInsets.top,
+            notchWidth: measuredWidth,
+            availableLeftWidth: leftSpace,
+            availableRightWidth: rightSpace
+        )
     }
 
     /// Distance from screen top edge to the collapse chevron button (`42pt` on a 38pt notch, `2pt` on non-notch displays).
@@ -66,9 +86,11 @@ struct PanelSafeLayout: Equatable, Sendable {
 @MainActor
 final class PanelLayoutState: ObservableObject {
     @Published private(set) var safeLayout: PanelSafeLayout
+    @Published var isPinned: Bool
 
-    init(safeLayout: PanelSafeLayout? = nil) {
+    init(safeLayout: PanelSafeLayout? = nil, isPinned: Bool = false) {
         self.safeLayout = safeLayout ?? PanelSafeLayout(screen: NSScreen.main)
+        self.isPinned = isPinned
     }
 
     func update(for screen: NSScreen?) {
@@ -76,6 +98,70 @@ final class PanelLayoutState: ObservableObject {
         if safeLayout != updated {
             safeLayout = updated
         }
+    }
+
+    func togglePin() {
+        isPinned.toggle()
+    }
+}
+
+enum MainMenuBuilder {
+    @MainActor
+    static func install() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(
+            withTitle: L10n.string("Quit"),
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+
+        let findItem = NSMenuItem(
+            title: "Find",
+            action: #selector(NSTextView.performFindPanelAction(_:)),
+            keyEquivalent: "f"
+        )
+        findItem.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+        editMenu.addItem(findItem)
+
+        let findNextItem = NSMenuItem(
+            title: "Find Next",
+            action: #selector(NSTextView.performFindPanelAction(_:)),
+            keyEquivalent: "g"
+        )
+        findNextItem.tag = Int(NSFindPanelAction.next.rawValue)
+        editMenu.addItem(findNextItem)
+
+        let findPrevItem = NSMenuItem(
+            title: "Find Previous",
+            action: #selector(NSTextView.performFindPanelAction(_:)),
+            keyEquivalent: "g"
+        )
+        findPrevItem.keyEquivalentModifierMask = [.command, .shift]
+        findPrevItem.tag = Int(NSFindPanelAction.previous.rawValue)
+        editMenu.addItem(findPrevItem)
+
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        NSApplication.shared.mainMenu = mainMenu
     }
 }
 
@@ -89,22 +175,81 @@ final class KeyablePanel: NSPanel {
             requestHide?()
             return
         }
+        if event.type == .leftMouseDown, !NSApp.isActive {
+            NSApp.activate()
+        }
         super.sendEvent(event)
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if super.performKeyEquivalent(with: event) {
+            return true
+        }
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
         let key = event.charactersIgnoringModifiers?.lowercased()
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
-            if key == "n" {
+        if flags == [.command] {
+            switch key {
+            case "n":
                 NotificationCenter.default.post(name: .islandNotesCreatePage, object: nil)
                 return true
-            }
-            if key == "w" {
+            case "w":
                 requestHide?()
                 return true
+            case "a":
+                if firstResponder?.tryToPerform(#selector(NSResponder.selectAll(_:)), with: self) == true {
+                    return true
+                }
+            case "c":
+                if firstResponder?.tryToPerform(#selector(NSText.copy(_:)), with: self) == true {
+                    return true
+                }
+            case "v":
+                if firstResponder?.tryToPerform(#selector(NSText.paste(_:)), with: self) == true {
+                    return true
+                }
+            case "x":
+                if firstResponder?.tryToPerform(#selector(NSText.cut(_:)), with: self) == true {
+                    return true
+                }
+            case "z":
+                if firstResponder?.tryToPerform(Selector(("undo:")), with: self) == true {
+                    return true
+                }
+            case "f":
+                if dispatchFindPanelAction(.showFindPanel) {
+                    return true
+                }
+            case "g":
+                if dispatchFindPanelAction(.next) {
+                    return true
+                }
+            default:
+                break
+            }
+        } else if flags == [.command, .shift] {
+            switch key {
+            case "z":
+                if firstResponder?.tryToPerform(Selector(("redo:")), with: self) == true {
+                    return true
+                }
+            case "g":
+                if dispatchFindPanelAction(.previous) {
+                    return true
+                }
+            default:
+                break
             }
         }
-        return super.performKeyEquivalent(with: event)
+        if NSApp.mainMenu?.performKeyEquivalent(with: event) == true {
+            return true
+        }
+        return false
+    }
+
+    private func dispatchFindPanelAction(_ action: NSFindPanelAction) -> Bool {
+        let item = NSMenuItem()
+        item.tag = Int(action.rawValue)
+        return firstResponder?.tryToPerform(#selector(NSTextView.performFindPanelAction(_:)), with: item) == true
     }
 
     override func cancelOperation(_ sender: Any?) {
@@ -204,7 +349,10 @@ final class PanelCoordinator {
     private let layoutState: PanelLayoutState
     private var screenObserver: NSObjectProtocol?
     private var resignKeyObserver: NSObjectProtocol?
+    private var resignActiveObserver: NSObjectProtocol?
+    private var fileDropWatchTimer: Timer?
     private var animationGeneration: UInt64 = 0
+    private var isAwaitingFileDrop = false
     private(set) var isPresented = false
     var onVisibilityChanged: ((Bool) -> Void)?
 
@@ -247,36 +395,75 @@ final class PanelCoordinator {
                 self?.refreshGeometryForActiveScreen()
             }
         }
+        // Observe key resignation across ALL app windows (including SwiftUI popovers)
+        // so switching apps via Cmd+Tab while a popover is open also hides an unpinned panel.
         resignKeyObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification,
-            object: panel,
+            object: nil,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 await Task.yield()
-                // Interactive SwiftUI popovers use a separate key window. Keep the
-                // notch panel alive while one of its controls owns that window.
-                if let keyWindow = NSApp.keyWindow, keyWindow !== self.panel {
+                guard self.isPresented,
+                      !self.layoutState.isPinned,
+                      !self.isAwaitingFileDrop,
+                      !self.hasActiveMarkedText else { return }
+                if NSApp.keyWindow != nil {
                     return
                 }
+                self.hide()
+            }
+        }
+        resignActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await Task.yield()
+                guard self.isPresented,
+                      !self.layoutState.isPinned,
+                      !self.isAwaitingFileDrop,
+                      !self.hasActiveMarkedText,
+                      NSApp.keyWindow == nil else { return }
                 self.hide()
             }
         }
     }
 
     deinit {
+        fileDropWatchTimer?.invalidate()
         if let screenObserver {
             NotificationCenter.default.removeObserver(screenObserver)
         }
         if let resignKeyObserver {
             NotificationCenter.default.removeObserver(resignKeyObserver)
         }
+        if let resignActiveObserver {
+            NotificationCenter.default.removeObserver(resignActiveObserver)
+        }
     }
 
     var isVisible: Bool { isPresented }
+    var currentScreen: NSScreen? { panel.screen }
+
+    private var hasActiveMarkedText: Bool {
+        (panel.firstResponder as? NSTextInputClient)?.hasMarkedText() == true
+    }
+
+    func focusPanel() {
+        guard isPresented else { return }
+        isAwaitingFileDrop = false
+        fileDropWatchTimer?.invalidate()
+        fileDropWatchTimer = nil
+        NSApp.activate()
+        panel.makeKeyAndOrderFront(nil)
+    }
 
     func dismissIfClickedOutside(at screenPoint: NSPoint) {
+        guard !isAwaitingFileDrop else { return }
         let insideRelatedWindow = NSApp.windows.contains { window in
             window !== panel && window.isVisible && window.frame.contains(screenPoint)
         }
@@ -284,7 +471,9 @@ final class PanelCoordinator {
         guard Self.shouldDismissForExternalClick(
             at: screenPoint,
             panelFrame: panel.frame,
-            isPresented: isPresented
+            isPresented: isPresented,
+            isPinned: layoutState.isPinned,
+            hasMarkedText: hasActiveMarkedText
         ) else { return }
         hide()
     }
@@ -292,20 +481,23 @@ final class PanelCoordinator {
     nonisolated static func shouldDismissForExternalClick(
         at screenPoint: NSPoint,
         panelFrame: NSRect,
-        isPresented: Bool
+        isPresented: Bool,
+        isPinned: Bool = false,
+        hasMarkedText: Bool = false
     ) -> Bool {
-        isPresented && !panelFrame.contains(screenPoint)
+        isPresented && !isPinned && !hasMarkedText && !panelFrame.contains(screenPoint)
     }
 
     func toggle() {
         isPresented ? hide() : show()
     }
 
-    func show() {
+    func show(initiatedByFileDrag: Bool = false, activateApp: Bool = true) {
         guard !isPresented else { return }
         guard let screen = screenAtPointer() ?? NSScreen.main else { return }
 
         isPresented = true
+        isAwaitingFileDrop = initiatedByFileDrag
         animationGeneration &+= 1
         let generation = animationGeneration
 
@@ -370,13 +562,24 @@ final class PanelCoordinator {
         }
 
         panel.alphaValue = 1
-        panel.makeKeyAndOrderFront(nil)
+        if initiatedByFileDrag {
+            panel.orderFrontRegardless()
+            watchActiveFileDragCompletion()
+        } else if activateApp {
+            NSApp.activate()
+            panel.makeKeyAndOrderFront(nil)
+        } else {
+            panel.orderFrontRegardless()
+        }
         notifyVisibility(true)
     }
 
     func hide() {
         guard isPresented else { return }
         isPresented = false
+        isAwaitingFileDrop = false
+        fileDropWatchTimer?.invalidate()
+        fileDropWatchTimer = nil
         animationGeneration &+= 1
         let generation = animationGeneration
         notifyVisibility(false)
@@ -430,11 +633,39 @@ final class PanelCoordinator {
         CATransaction.commit()
     }
 
+    private func watchActiveFileDragCompletion() {
+        fileDropWatchTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.06, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard self.isPresented, self.isAwaitingFileDrop else {
+                    self.fileDropWatchTimer?.invalidate()
+                    self.fileDropWatchTimer = nil
+                    return
+                }
+                guard (NSEvent.pressedMouseButtons & 1) == 0 else { return }
+                self.isAwaitingFileDrop = false
+                self.fileDropWatchTimer?.invalidate()
+                self.fileDropWatchTimer = nil
+
+                let releasePoint = NSEvent.mouseLocation
+                if self.panel.frame.contains(releasePoint) || self.layoutState.isPinned {
+                    NSApp.activate()
+                    self.panel.makeKeyAndOrderFront(nil)
+                } else {
+                    self.hide()
+                }
+            }
+        }
+        timer.tolerance = 0.02
+        RunLoop.main.add(timer, forMode: .common)
+        fileDropWatchTimer = timer
+    }
+
     private func expandedFrame(for screen: NSScreen, safeLayout: PanelSafeLayout) -> NSRect {
-        let rawWidth = min(760, max(620, screen.visibleFrame.width * 0.62)) / 2
-        let baseHeight = min(820, max(620, screen.visibleFrame.height * 0.87)) / 2
+        let width = round(min(380, max(310, screen.visibleFrame.width * 0.31)))
+        let baseHeight = min(410, max(310, screen.visibleFrame.height * 0.435))
         let maxAllowedHeight = max(320, screen.frame.height - 24)
-        let width = round(rawWidth)
         let height = min(round(maxAllowedHeight), round(baseHeight + safeLayout.extraPanelHeight))
         return NSRect(
             x: round(screen.frame.midX - width / 2),
@@ -475,15 +706,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let activationMonitor = TopEdgeActivationMonitor()
     private let layoutState = PanelLayoutState()
     private var panel: PanelCoordinator!
+    private var notchIsland: NotchIslandCoordinator!
     private var statusItem: NSStatusItem!
     private var outsideClickMonitor: Any?
-    private var outsideClickPollTimer: Timer?
-    private var previousPressedMouseButtons = 0
     private var screenshotTask: Task<Void, Never>?
     private var captureHotKey: GlobalHotKeyController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
+        MainMenuBuilder.install()
 
         panel = PanelCoordinator(
             layoutState: layoutState,
@@ -493,14 +724,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 layoutState: layoutState,
                 onClose: { [weak self] in self?.panel.hide() },
                 preferencesChanged: { [weak self] in self?.applyPreferences() },
-                captureScreenshot: { [weak self] in self?.beginScreenshotCapture() }
+                captureScreenshot: { [weak self] in self?.beginScreenshotCapture() },
+                onShelfFilesDropped: { [weak self] in self?.panel.focusPanel() }
             )
         )
         panel.onVisibilityChanged = { [weak self] visible in
             guard let self else { return }
             self.activationMonitor.notifyPanelVisibilityChanged(visible)
             self.reminder.setPanelVisible(visible)
-            self.setOutsideClickPollingEnabled(visible)
+            self.notchIsland.setMainPanelVisible(visible, activeScreen: self.panel.currentScreen)
+        }
+        notchIsland = NotchIslandCoordinator(
+            store: store,
+            reminder: reminder,
+            layoutState: layoutState,
+            onExpandPanel: { [weak self] in
+                self?.panel.show()
+            },
+            onFilesDropped: { [weak self] urls in
+                guard let self else { return false }
+                let files = urls.filter(\.isFileURL)
+                guard !files.isEmpty else { return false }
+                _ = self.store.addShelfURLs(files)
+                self.panel.show()
+                return true
+            }
+        )
+        notchIsland.onVisibilityChanged = { [weak self] visible in
+            self?.reminder.setIslandVisible(visible)
+        }
+        notchIsland.onHoverInHoverActivationMode = { [weak self] in
+            _ = self?.activationMonitor.evaluateLiveHover()
+        }
+        reminder.onBreakTriggered = { [weak self] in
+            self?.panel.show(activateApp: false)
         }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -508,7 +765,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePanel)
 
-        activationMonitor.activate = { [weak self] in self?.panel.show() }
+        activationMonitor.activate = { [weak self] in
+            self?.panel.show()
+        }
+        activationMonitor.activateForFileDrag = { [weak self] in
+            self?.panel.show(initiatedByFileDrag: true)
+        }
         captureHotKey = GlobalHotKeyController(
             keyCode: UInt32(kVK_ANSI_2),
             modifiers: UInt32(cmdKey | optionKey)
@@ -536,7 +798,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(outsideClickMonitor)
         }
         outsideClickMonitor = nil
-        setOutsideClickPollingEnabled(false)
         store.save()
         keepAwake.setEnabled(false)
     }
@@ -552,11 +813,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard screenshotTask == nil else { return }
         let wasVisible = panel.isVisible
         store.reportExternalError(nil)
+        notchIsland.setSuppressed(true)
         if wasVisible { panel.hide() }
 
         screenshotTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.screenshotTask = nil }
+            defer {
+                self.notchIsland.setSuppressed(false)
+                self.screenshotTask = nil
+            }
 
             if wasVisible {
                 try? await Task.sleep(nanoseconds: 240_000_000)
@@ -594,26 +859,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func setOutsideClickPollingEnabled(_ enabled: Bool) {
-        outsideClickPollTimer?.invalidate()
-        outsideClickPollTimer = nil
-        previousPressedMouseButtons = enabled ? NSEvent.pressedMouseButtons : 0
-        guard enabled else { return }
-
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                let pressed = NSEvent.pressedMouseButtons
-                let newlyPressed = pressed & ~self.previousPressedMouseButtons
-                self.previousPressedMouseButtons = pressed
-                guard newlyPressed != 0 else { return }
-                self.panel.dismissIfClickedOutside(at: NSEvent.mouseLocation)
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        outsideClickPollTimer = timer
-    }
-
     private func applyPreferences() {
         let preferences = store.preferences
         activationMonitor.mode = preferences.activationMode
@@ -622,5 +867,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             enabled: preferences.breakReminderEnabled,
             intervalMinutes: preferences.breakIntervalMinutes
         )
+        notchIsland?.refreshForPreferencesChange()
     }
 }

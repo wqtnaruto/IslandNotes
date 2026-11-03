@@ -1,7 +1,9 @@
 import Foundation
 
 enum L10n {
-    private static let defaultBundle: Bundle = {
+    static let locale = Locale(identifier: "zh-Hans")
+
+    private static let chineseBundle: Bundle = {
         let localization = "zh-Hans"
         if let stringsURL = Bundle.module.url(
             forResource: "Localizable",
@@ -20,17 +22,22 @@ enum L10n {
     }()
 
     static func string(_ key: String) -> String {
-        defaultBundle.localizedString(forKey: key, value: key, table: nil)
+        chineseBundle.localizedString(forKey: key, value: key, table: nil)
     }
 
-    /// Starter content is part of the product's default experience, rather than
-    /// user-authored text. Keep it Chinese even when Xcode temporarily overrides
-    /// the process language in the Run scheme.
     static func defaultChineseString(_ key: String) -> String {
         string(key)
     }
 
     static func minutes(_ value: Int) -> String {
-        String(format: string("Minutes remaining format"), locale: .current, value)
+        String(format: string("Minutes remaining format"), locale: locale, value)
+    }
+
+    static func compactMinutes(_ value: Int) -> String {
+        String(format: string("Compact minutes format"), locale: locale, value)
+    }
+
+    static func focusRemaining(_ value: Int) -> String {
+        String(format: string("Focus remaining format"), locale: locale, value)
     }
 }
