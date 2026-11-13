@@ -27,6 +27,9 @@ struct ContentView: View {
         .day()
         .weekday(.wide)
 
+    // At the 12-point tab font, allow roughly 15 full-width Chinese characters.
+    private static let tabTitleMaxWidth: CGFloat = 180
+
     private var theme: VisualTheme {
         VisualTheme(isDark: store.preferences.themeMode == .dark ||
             (store.preferences.themeMode == .system && systemScheme == .dark))
@@ -275,12 +278,16 @@ struct ContentView: View {
                         if isActive {
                             Circle().fill(theme.accent).frame(width: 6, height: 6)
                         }
-                        Text(note.title).lineLimit(1).frame(maxWidth: 84)
+                        Text(note.title)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: Self.tabTitleMaxWidth)
                     }
                     // Keep exact horizontal width identical between active (11 + 6 + 6 + 11 = 34)
                     // and inactive (17 + 17 = 34) states so tabs never jump horizontally on switch.
                     .padding(.horizontal, isActive ? 11 : 17)
                     .frame(minWidth: 68, maxHeight: .infinity)
+                    .fixedSize(horizontal: true, vertical: false)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -532,7 +539,7 @@ struct ContentView: View {
         let estimated = draft.reduce(CGFloat(16)) { partial, ch in
             partial + (ch.isASCII ? 7.2 : 12.2)
         }
-        return min(156, max(76, ceil(estimated)))
+        return min(Self.tabTitleMaxWidth, max(76, ceil(estimated)))
     }
 
     private func beginRename(for note: NoteTabSummary) {
