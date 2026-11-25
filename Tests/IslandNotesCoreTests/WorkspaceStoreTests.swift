@@ -1297,6 +1297,7 @@ final class WorkspaceStoreTests: XCTestCase {
         let legacyJSON = #"{"activationMode":"click","keepAwake":false,"breakReminderEnabled":false,"breakIntervalMinutes":25}"#
         let decoded = try JSONDecoder().decode(AppPreferences.self, from: Data(legacyJSON.utf8))
         XCTAssertTrue(decoded.notchIslandEnabled)
+        XCTAssertEqual(decoded.islandPreview, .notes)
         XCTAssertEqual(L10n.string("Notch island"), "灵动岛状态")
         XCTAssertEqual(L10n.compactMinutes(25), "25分钟")
 
@@ -1391,9 +1392,8 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertNil(container.hitTest(extendedRightPoint))
 
         // On hover (`isPeeking == true`), windowHeight stays constant (zero NSWindow resize jump),
-        // hardware notch cutout stays locked at [245, 455], both wings expand monotonically outward
-        // (never shrinking inward away from the pointer!), and the two-line below-notch card (`80pt`)
-        // becomes interactive while points below the card (`y = 86`) still pass through.
+        // the notch stays centered and both wings expand outward.
+        // The preview becomes interactive while points below it still pass through.
         let peek = NotchIslandLayout.compute(safeLayout: notchedSafe, snapshot: model.snapshot, isPeeking: true)
         container.interactiveRect = peek.interactiveRect
         XCTAssertEqual(peek.windowHeight, compact.windowHeight)
@@ -1401,12 +1401,12 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(peek.peekTotalBodyWidth, compact.peekTotalBodyWidth, accuracy: 0.01)
         XCTAssertGreaterThan(peek.leftWingWidth, compact.leftWingWidth)
         XCTAssertGreaterThan(peek.rightWingWidth, compact.rightWingWidth)
-        XCTAssertEqual(peek.bodyHeight, 80, accuracy: 0.01)
+        XCTAssertEqual(peek.bodyHeight, 120, accuracy: 0.01)
         let peekNotchStartX = peek.interactiveRect.minX + NotchIslandLayout.topEarRadius + peek.leftWingWidth
         XCTAssertEqual(peekNotchStartX, notchStartX, accuracy: 0.01)
         XCTAssertNotNil(container.hitTest(extendedRightPoint))
         XCTAssertNotNil(container.hitTest(belowCompactInCardRow))
-        let belowExpandedCard = NSPoint(x: 350, y: windowRect.height - 86)
+        let belowExpandedCard = NSPoint(x: 350, y: windowRect.height - peek.bodyHeight - 6)
         XCTAssertNil(container.hitTest(belowExpandedCard))
 
         // Retracted state tucks both wings cleanly behind the hardware notch with zero interactive hit area
@@ -1422,6 +1422,38 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(retracted.peekTotalBodyWidth, compact.peekTotalBodyWidth, accuracy: 0.01)
         XCTAssertEqual(retracted.interactiveRect, .zero)
         reminder.configure(enabled: false, intervalMinutes: 25)
+    }
+
+    func testCodexPreviewPersistsAndRemainsReachableAfterLastTask() {
+        let location = temporaryURL()
+        let store = WorkspaceStore(storageURL: location)
+        let model = NotchIslandModel(store: store, reminder: BreakReminder())
+        let tasks = (0..<4).map { index in
+            CodexTask(id: UUID(), title: "任务 \(index + 1)", project: "IslandNotes", startedAt: .now)
+        }
+
+        model.setCodexActivity(.available(tasks))
+        XCTAssertTrue(model.snapshot.shouldPresent)
+        XCTAssertTrue(model.snapshot.showsCodexBadge)
+        model.isPeeking = true
+        model.selectPreview(.codex)
+        XCTAssertEqual(WorkspaceStore(storageURL: location).preferences.islandPreview, .codex)
+
+        for screen in [PanelSafeLayout(safeAreaTop: 38), PanelSafeLayout(safeAreaTop: 0)] {
+            let layout = NotchIslandLayout.compute(safeLayout: screen, snapshot: model.snapshot, isPeeking: true)
+            let height = NotchIslandLayout.previewTopInset(for: screen) + NotchIslandLayout.previewPickerHeight
+                + NotchIslandLayout.codexRowHeight * 3 + NotchIslandLayout.previewBottomPadding
+            XCTAssertEqual(layout.interactiveRect.height, height)
+            XCTAssertGreaterThanOrEqual(layout.windowHeight, height)
+        }
+
+        model.setCodexActivity(.available([]))
+        XCTAssertTrue(model.snapshot.shouldPresent)
+        XCTAssertTrue(model.isPeeking)
+        model.selectPreview(.notes)
+        XCTAssertTrue(model.isPeeking)
+        model.isPeeking = false
+        XCTAssertFalse(model.snapshot.shouldPresent)
     }
 
     func testBreakReminderRefreshesProgressWhileCollapsedIslandIsVisible() {
@@ -1456,7 +1488,7 @@ final class WorkspaceStoreTests: XCTestCase {
 
         let snapshotDir = ProcessInfo.processInfo.environment["ISLANDNOTES_ISLAND_SNAPSHOT_DIR"]
 
-        let cases: [(name: String, markdown: String, safeLayout: PanelSafeLayout, peeking: Bool)] = [
+        var cases: [(name: String, markdown: String, safeLayout: PanelSafeLayout, peeking: Bool)] = [
             ("notched-compact", "# 迭代计划\n- [ ] 打磨刘海灵动岛专注进度与置顶待办\n- [ ] 验证外接显示器兼容\n", PanelSafeLayout(safeAreaTop: 38, notchWidth: 209), false),
             ("notched-peek", "# 迭代计划\n- [ ] 打磨刘海灵动岛专注进度与置顶待办\n- [ ] 验证外接显示器兼容\n", PanelSafeLayout(safeAreaTop: 38, notchWidth: 209), true),
             ("notched-short-compact", "- [ ] 会话洞察需求\n", PanelSafeLayout(safeAreaTop: 38, notchWidth: 209), false),
@@ -1464,9 +1496,20 @@ final class WorkspaceStoreTests: XCTestCase {
             ("external-compact", "# 迭代计划\n- [ ] 打磨刘海灵动岛专注进度与置顶待办\n- [ ] 验证外接显示器兼容\n", PanelSafeLayout(safeAreaTop: 0, notchWidth: 0), false),
             ("external-peek", "# 迭代计划\n- [ ] 打磨刘海灵动岛专注进度与置顶待办\n- [ ] 验证外接显示器兼容\n", PanelSafeLayout(safeAreaTop: 0, notchWidth: 0), true)
         ]
+        cases += [
+            ("notched-codex", "", PanelSafeLayout(safeAreaTop: 38, notchWidth: 209), true),
+            ("external-codex", "", PanelSafeLayout(safeAreaTop: 0), true)
+        ]
 
         for testCase in cases {
             store.updateActiveMarkdown(testCase.markdown)
+            if testCase.name.hasSuffix("-codex") {
+                model.selectPreview(.codex)
+                model.setCodexActivity(.available([
+                    CodexTask(id: UUID(), title: "灵动岛任务卡片", project: "IslandNotes", startedAt: .now),
+                    CodexTask(id: UUID(), title: "修复登录状态", project: "个人项目", startedAt: .now)
+                ]))
+            }
             model.refreshSnapshot()
             model.isPeeking = testCase.peeking
             let layoutState = PanelLayoutState(safeLayout: testCase.safeLayout)

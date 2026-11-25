@@ -59,5 +59,12 @@
 "Keep Mac awake active" = "保持唤醒已开启";
 "Complete task" = "完成待办";
 "Open notes" = "展开笔记";
+"Notes" = "笔记";
+"Checking Codex activity" = "正在读取 Codex 状态";
+"No running Codex tasks" = "暂无运行中的任务";
+"Could not read Codex activity" = "暂时无法读取 Codex 状态";
+"Untitled Codex task" = "未命名任务";
+"Could not open Codex chat" = "无法打开 Codex 对话";
+"%lld running Codex tasks" = "%lld 条 Codex 任务正在运行";
 "Compact minutes format" = "%d分钟";
 "Focus remaining format" = "专注剩余 %d 分钟";

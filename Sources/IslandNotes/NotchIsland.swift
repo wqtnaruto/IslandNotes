@@ -15,6 +15,9 @@ struct NotchIslandSnapshot: Equatable, Sendable {
     let keepAwake: Bool
     let themeMode: ThemeMode
     let islandEnabled: Bool
+    let preview: IslandPreview
+    let codexActivity: CodexActivity
+    let isPeeking: Bool
     let isMainPanelVisible: Bool
     let isSuppressed: Bool
 
@@ -32,18 +35,32 @@ struct NotchIslandSnapshot: Equatable, Sendable {
         focusActive || keepAwake
     }
 
-    var hasActiveContent: Bool {
+    var hasNotesActivity: Bool {
         focusActive || keepAwake || effectiveTaskText != nil
     }
 
+    var hasCodexContent: Bool {
+        preview == .codex || !codexActivity.tasks.isEmpty
+    }
+
+    var showsCodexBadge: Bool {
+        !codexActivity.tasks.isEmpty || (preview == .codex && !hasNotesActivity)
+    }
+
     var shouldPresent: Bool {
-        islandEnabled && !isMainPanelVisible && !isSuppressed && hasActiveContent
+        islandEnabled && !isMainPanelVisible && !isSuppressed && (hasNotesActivity || hasCodexContent || isPeeking)
     }
 }
 
 struct NotchIslandLayout: Equatable, Sendable {
     static let canvasWidth: CGFloat = 700
     static let topEarRadius: CGFloat = 8
+    static let previewPickerHeight: CGFloat = 36
+    static let noteHeaderHeight: CGFloat = 24
+    static let noteRowHeight: CGFloat = 38
+    static let codexRowHeight: CGFloat = 42
+    static let visibleCodexRows = 3
+    static let previewBottomPadding: CGFloat = 8
 
     let isNotched: Bool
     let isPeeking: Bool
@@ -55,7 +72,7 @@ struct NotchIslandLayout: Equatable, Sendable {
     let compactRightWingWidth: CGFloat
     let compactBodyHeight: CGFloat
 
-    /// Invariant expanded card wing dimensions (used by the two-line below-notch card so its text never reflows during morph).
+    /// Expanded wing widths stay stable across preview modes.
     let peekLeftWingWidth: CGFloat
     let peekRightWingWidth: CGFloat
     let peekBodyHeight: CGFloat
@@ -95,10 +112,18 @@ struct NotchIslandLayout: Equatable, Sendable {
         return CGRect(x: minX, y: 0, width: width, height: bodyHeight)
     }
 
-    /// Fixed host window height tall enough to accommodate both the compact wings and the two-line
-    /// below-notch card without ever calling `NSWindow.setFrame` on hover.
+    /// The host window fits the largest preview so hovering never resizes it.
     static func fixedWindowHeight(for safeLayout: PanelSafeLayout) -> CGFloat {
-        safeLayout.notchHeight > 0 ? safeLayout.notchHeight + 52 : 74
+        previewTopInset(for: safeLayout) + previewPickerHeight
+            + codexRowHeight * CGFloat(visibleCodexRows) + previewBottomPadding
+    }
+
+    static func previewTopInset(for safeLayout: PanelSafeLayout) -> CGFloat {
+        safeLayout.notchHeight > 0 ? max(30, safeLayout.notchHeight) : 0
+    }
+
+    static func codexListHeight(count: Int) -> CGFloat {
+        codexRowHeight * CGFloat(max(1, min(count, visibleCodexRows)))
     }
 
     static func compute(
@@ -109,16 +134,18 @@ struct NotchIslandLayout: Equatable, Sendable {
     ) -> NotchIslandLayout {
         let hasNotch = safeLayout.notchHeight > 0
         let fixedWinHeight = fixedWindowHeight(for: safeLayout)
+        let detailHeight = snapshot.preview == .codex
+            ? codexListHeight(count: snapshot.codexActivity.tasks.count)
+            : noteRowHeight + (hasNotch ? 0 : noteHeaderHeight)
+        let peekHeight = previewTopInset(for: safeLayout) + previewPickerHeight + detailHeight + previewBottomPadding
 
         if hasNotch {
             let compactHeight = safeLayout.notchHeight + (snapshot.hasProgressOrBreathingBar ? 3 : 1)
-            let cardRowHeight: CGFloat = 42
-            let peekHeight = safeLayout.notchHeight + cardRowHeight
 
             let maxCompactLeft = max(58, min(102, safeLayout.availableLeftWidth))
             let maxCompactRight = max(84, min(114, safeLayout.availableRightWidth))
 
-            let compactLeft: CGFloat
+            let notesLeft: CGFloat
             let compactRight: CGFloat
             if let taskText = snapshot.effectiveTaskText {
                 let rawLeft: CGFloat
@@ -129,14 +156,18 @@ struct NotchIslandLayout: Equatable, Sendable {
                 } else {
                     rawLeft = 56
                 }
-                compactLeft = min(maxCompactLeft, rawLeft)
+                notesLeft = min(maxCompactLeft, rawLeft)
                 let estimatedTask = ceil(estimateTextWidth(taskText, asciiAdvance: 6.4, cjkAdvance: 11.3)) + 36
                 compactRight = min(maxCompactRight, max(84, estimatedTask))
             } else {
                 let wing = min(min(maxCompactLeft, maxCompactRight), snapshot.focusActive ? 62 : 56)
-                compactLeft = wing
+                notesLeft = wing
                 compactRight = wing
             }
+            let showsNotesStatus = snapshot.focusActive || snapshot.keepAwake
+            let compactLeft = snapshot.showsCodexBadge && showsNotesStatus
+                ? min(maxCompactLeft, notesLeft + 36)
+                : notesLeft
 
             // Symmetric, content-stable below-notch card width that strictly expands outward beyond compact wings
             // so hovering never shrinks either wing away from the pointer and sequential task completions don't shift `☐`.
@@ -186,16 +217,16 @@ struct NotchIslandLayout: Equatable, Sendable {
             )
         } else {
             let compactHeight: CGFloat = snapshot.hasProgressOrBreathingBar ? 26 : 24
-            let peekHeight: CGFloat = 64
 
-            let compactTotal: CGFloat
+            let notesWidth: CGFloat
             if let taskText = snapshot.effectiveTaskText {
                 let statusWidth: CGFloat = (snapshot.focusActive || snapshot.keepAwake) ? 72 : 0
                 let taskWidth = min(158, max(76, ceil(estimateTextWidth(taskText, asciiAdvance: 6.4, cjkAdvance: 11.3)) + 34))
-                compactTotal = min(264, max(128, statusWidth + taskWidth + 16))
+                notesWidth = min(264, max(128, statusWidth + taskWidth + 16))
             } else {
-                compactTotal = snapshot.focusActive ? 124 : 106
+                notesWidth = snapshot.focusActive ? 124 : 106
             }
+            let compactTotal = notesWidth + (snapshot.showsCodexBadge && snapshot.hasNotesActivity ? 46 : 0)
             let compactHalf = round(compactTotal / 2)
             let peekHalf = max(compactHalf + 18, snapshot.effectiveTaskText != nil ? 166 : 148)
 
@@ -355,7 +386,11 @@ struct CanvasIslandRimShape: Shape {
 @MainActor
 final class NotchIslandModel: ObservableObject {
     @Published private(set) var snapshot: NotchIslandSnapshot
-    @Published var isPeeking = false
+    @Published var isPeeking = false {
+        didSet {
+            if oldValue != isPeeking { refreshSnapshot() }
+        }
+    }
     @Published var isRetracted = false
 
     private let store: WorkspaceStore
@@ -363,6 +398,7 @@ final class NotchIslandModel: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var completionFeedbackTask: Task<Void, Never>?
     private var completedPreviewText: String?
+    private var codexActivity: CodexActivity = .loading
     private var isMainPanelVisible = false
     private var isSuppressed = false
 
@@ -373,6 +409,8 @@ final class NotchIslandModel: ObservableObject {
             store: store,
             reminder: reminder,
             completedPreviewText: nil,
+            codexActivity: .loading,
+            isPeeking: false,
             isMainPanelVisible: false,
             isSuppressed: false
         )
@@ -420,6 +458,17 @@ final class NotchIslandModel: ObservableObject {
         refreshSnapshot()
     }
 
+    func selectPreview(_ preview: IslandPreview) {
+        store.updatePreferences { $0.islandPreview = preview }
+        refreshSnapshot()
+    }
+
+    func setCodexActivity(_ activity: CodexActivity) {
+        guard !Task.isCancelled, codexActivity != activity else { return }
+        codexActivity = activity
+        refreshSnapshot()
+    }
+
     func completeCurrentPinnedTask() {
         guard completedPreviewText == nil,
               let task = snapshot.pinnedTask else { return }
@@ -442,6 +491,7 @@ final class NotchIslandModel: ObservableObject {
             let willHideAfterFeedback = nextOverview.firstUnchecked == nil
                 && self.reminder.nextBreakAt == nil
                 && !self.store.preferences.keepAwake
+                && !self.snapshot.hasCodexContent
 
             if willHideAfterFeedback {
                 self.isPeeking = false
@@ -461,6 +511,8 @@ final class NotchIslandModel: ObservableObject {
             store: store,
             reminder: reminder,
             completedPreviewText: completedPreviewText,
+            codexActivity: codexActivity,
+            isPeeking: isPeeking,
             isMainPanelVisible: isMainPanelVisible,
             isSuppressed: isSuppressed
         )
@@ -476,6 +528,8 @@ final class NotchIslandModel: ObservableObject {
         store: WorkspaceStore,
         reminder: BreakReminder,
         completedPreviewText: String?,
+        codexActivity: CodexActivity,
+        isPeeking: Bool,
         isMainPanelVisible: Bool,
         isSuppressed: Bool
     ) -> NotchIslandSnapshot {
@@ -494,6 +548,9 @@ final class NotchIslandModel: ObservableObject {
             keepAwake: store.preferences.keepAwake,
             themeMode: store.preferences.themeMode,
             islandEnabled: store.preferences.notchIslandEnabled,
+            preview: store.preferences.islandPreview,
+            codexActivity: codexActivity,
+            isPeeking: isPeeking,
             isMainPanelVisible: isMainPanelVisible,
             isSuppressed: isSuppressed
         )
@@ -509,6 +566,7 @@ struct NotchIslandView: View {
     @Environment(\.colorScheme) private var systemScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHoveringCheckbox = false
+    @State private var failedCodexTaskID: UUID?
 
     private static let islandBackground = Color(red: 5/255, green: 5/255, blue: 7/255)
     private static let islandSecondary = Color.white.opacity(0.66)
@@ -595,9 +653,7 @@ struct NotchIslandView: View {
                         .animation(morphSpring, value: model.snapshot.keepAwake)
                         .allowsHitTesting(false)
 
-                    // 2. Persistent two-layer foreground (compact wings + two-line below-notch card)
-                    // Both stay mounted at fixed internal widths so zero views are destroyed/recreated
-                    // and zero Text layouts jump during the morph!
+                    // Keep the compact and expanded layers mounted at stable widths during the morph.
                     ZStack(alignment: .top) {
                         compactForeground(layout: layout)
                             .opacity((layout.isPeeking || layout.isRetracted) ? 0 : 1)
@@ -644,6 +700,8 @@ struct NotchIslandView: View {
                         .animation(morphSpring, value: model.snapshot.effectiveTaskText)
                         .allowsHitTesting(false)
                 }
+                .animation(morphSpring, value: layout.peekBodyHeight)
+                .animation(morphSpring, value: layout.compactTotalBodyWidth)
                 .frame(width: NotchIslandLayout.canvasWidth, height: layout.windowHeight, alignment: .top)
                 .dropDestination(for: URL.self) { urls, _ in
                     onFilesDropped(urls)
@@ -673,9 +731,25 @@ struct NotchIslandView: View {
                     .allowsHitTesting(false)
 
                 Button(action: onExpandPanel) {
-                    notchedCompactLeftWing(snapshot: snapshot)
-                        .frame(width: layout.compactLeftWingWidth, height: wingHeight, alignment: .trailing)
-                        .contentShape(Rectangle())
+                    Group {
+                        if snapshot.showsCodexBadge {
+                            ViewThatFits(in: .horizontal) {
+                                if snapshot.focusActive || snapshot.keepAwake {
+                                    HStack(spacing: 0) {
+                                        notchedCompactLeftWing(snapshot: snapshot)
+                                        codexBadge(count: snapshot.codexActivity.tasks.count)
+                                    }
+                                    .fixedSize(horizontal: true, vertical: false)
+                                }
+                                codexBadge(count: snapshot.codexActivity.tasks.count)
+                            }
+                            .padding(.trailing, 8)
+                        } else {
+                            notchedCompactLeftWing(snapshot: snapshot)
+                        }
+                    }
+                    .frame(width: layout.compactLeftWingWidth, height: wingHeight, alignment: .trailing)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(L10n.string("Open notes"))
@@ -699,6 +773,15 @@ struct NotchIslandView: View {
         } else {
             let barHeight: CGFloat = 24
             HStack(spacing: 6) {
+                if snapshot.showsCodexBadge {
+                    Button(action: onExpandPanel) {
+                        codexBadge(count: snapshot.codexActivity.tasks.count)
+                            .frame(height: barHeight)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 if snapshot.focusActive || snapshot.keepAwake {
                     Button(action: onExpandPanel) {
                         compactStatusBadge(snapshot: snapshot)
@@ -737,75 +820,172 @@ struct NotchIslandView: View {
         }
     }
 
-    // MARK: - Layer 2: Expanded Two-Line Card Below the Notch（「刘海下双行卡片」）
+    // MARK: - Layer 2: Expanded Preview
 
     @ViewBuilder
     private func expandedBelowNotchCard(layout: NotchIslandLayout) -> some View {
         let snapshot = model.snapshot
         let cardWidth = layout.peekTotalBodyWidth
-        let topBandHeight: CGFloat = layout.isNotched ? max(30, layoutState.safeLayout.notchHeight) : 24
-        let detailHeight: CGFloat = layout.isNotched ? 38 : 36
+        let topInset = NotchIslandLayout.previewTopInset(for: layoutState.safeLayout)
 
         VStack(spacing: 0) {
-            // Row 1: Header band flanking the physical notch (or top of external card)
             if layout.isNotched {
-                HStack(spacing: 0) {
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(accentColor)
-                            .frame(width: 6, height: 6)
-                        Text(snapshot.noteTitle)
-                            .font(.system(size: 10.5, weight: .medium))
-                            .foregroundStyle(Self.islandSecondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    .padding(.leading, 12)
-                    .padding(.trailing, 6)
-                    .frame(width: layout.peekLeftWingWidth, height: topBandHeight, alignment: .leading)
-
+                if snapshot.preview == .notes {
+                    notePreviewHeader(layout: layout, height: topInset)
+                } else {
                     Color.clear
-                        .frame(width: layout.centerNotchWidth, height: topBandHeight)
-
-                    HStack(spacing: 6) {
-                        Spacer(minLength: 0)
-                        if snapshot.keepAwake {
-                            Image(systemName: "bolt.fill")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(focusColor)
-                        }
-                        if snapshot.focusActive, snapshot.totalTaskCount > 0 {
-                            Text("\(snapshot.completedCount)/\(snapshot.totalTaskCount)")
-                                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
-                                .foregroundStyle(Self.islandSecondary)
-                                .padding(.horizontal, 5.5)
-                                .padding(.vertical, 1.5)
-                                .background(Color.white.opacity(0.08), in: Capsule())
-                        }
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(Self.islandSecondary)
-                    }
-                    .padding(.leading, 6)
-                    .padding(.trailing, 12)
-                    .frame(width: layout.peekRightWingWidth, height: topBandHeight, alignment: .trailing)
+                        .frame(height: topInset)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: onExpandPanel)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onExpandPanel)
+            }
+
+            previewPicker
+                .frame(height: NotchIslandLayout.previewPickerHeight)
+
+            if snapshot.preview == .codex {
+                codexTaskList(snapshot.codexActivity)
+                    .padding(.horizontal, 12)
             } else {
-                HStack(spacing: 6) {
+                if !layout.isNotched {
+                    notePreviewHeader(layout: layout, height: NotchIslandLayout.noteHeaderHeight)
+                }
+                expandedCardDetailRow(snapshot: snapshot, height: NotchIslandLayout.noteRowHeight)
+                    .padding(.horizontal, 13)
+            }
+        }
+        .padding(.bottom, NotchIslandLayout.previewBottomPadding)
+        .frame(width: cardWidth, alignment: .top)
+    }
+
+    private var previewPicker: some View {
+        HStack(spacing: 2) {
+            ForEach(IslandPreview.allCases, id: \.self) { preview in
+                let selected = preview == model.snapshot.preview
+                Button {
+                    model.selectPreview(preview)
+                } label: {
+                    HStack(spacing: 5) {
+                        if preview == .codex && !model.snapshot.codexActivity.tasks.isEmpty {
+                            Circle()
+                                .fill(accentColor)
+                                .frame(width: 5, height: 5)
+                                .accessibilityHidden(true)
+                        }
+                        Text(preview.label)
+                            .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                            .foregroundStyle(selected ? Color.white : Self.islandSecondary)
+                    }
+                    .frame(width: 84, height: 24)
+                    .background(selected ? Color.white.opacity(0.15) : .clear, in: Capsule())
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? [.isSelected] : [])
+            }
+        }
+        .padding(2)
+        .background(Color.white.opacity(0.05), in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func codexTaskList(_ activity: CodexActivity) -> some View {
+        let tasks = activity.tasks
+        let height = NotchIslandLayout.codexListHeight(count: tasks.count)
+        if tasks.isEmpty {
+            Text(L10n.string(codexEmptyMessage(for: activity)))
+                .font(.system(size: 12))
+                .foregroundStyle(Self.islandSecondary)
+                .frame(maxWidth: .infinity)
+                .frame(height: height)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(tasks) { task in
+                        CodexTaskRow(task: task, failedToOpen: failedCodexTaskID == task.id) {
+                            if NSWorkspace.shared.open(task.conversationURL) {
+                                failedCodexTaskID = nil
+                                model.isPeeking = false
+                            } else {
+                                failedCodexTaskID = task.id
+                            }
+                        }
+                        .overlay(alignment: .top) {
+                            if task.id != tasks.first?.id {
+                                Rectangle()
+                                    .fill(Color.white.opacity(0.09))
+                                    .frame(height: 1)
+                                    .padding(.horizontal, 8)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                    }
+                }
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollDisabled(tasks.count <= NotchIslandLayout.visibleCodexRows)
+            .frame(height: height)
+        }
+    }
+
+    private func codexEmptyMessage(for activity: CodexActivity) -> String {
+        switch activity {
+        case .loading: "Checking Codex activity"
+        case .available: "No running Codex tasks"
+        case .unavailable: "Could not read Codex activity"
+        }
+    }
+
+    private func codexBadge(count: Int) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "terminal")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(count > 0 ? accentColor : Self.islandSecondary)
+            if count > 0 {
+                Text(count, format: .number)
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            count > 0
+                ? String(format: L10n.string("%lld running Codex tasks"), Int64(count))
+                : "Codex"
+        )
+    }
+
+    @ViewBuilder
+    private func notePreviewHeader(layout: NotchIslandLayout, height: CGFloat) -> some View {
+        let snapshot = model.snapshot
+        let cardWidth = layout.peekTotalBodyWidth
+        if layout.isNotched {
+            HStack(spacing: 0) {
+                HStack(spacing: 5) {
                     Circle()
                         .fill(accentColor)
-                        .frame(width: 5.5, height: 5.5)
+                        .frame(width: 6, height: 6)
                     Text(snapshot.noteTitle)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(Self.islandSecondary)
                         .lineLimit(1)
-                    Spacer(minLength: 4)
+                        .truncationMode(.tail)
+                }
+                .padding(.leading, 12)
+                .padding(.trailing, 6)
+                .frame(width: layout.peekLeftWingWidth, height: height, alignment: .leading)
+
+                Color.clear
+                    .frame(width: layout.centerNotchWidth, height: height)
+
+                HStack(spacing: 6) {
+                    Spacer(minLength: 0)
                     if snapshot.keepAwake {
                         Image(systemName: "bolt.fill")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 9.5, weight: .semibold))
                             .foregroundStyle(focusColor)
                     }
                     if snapshot.focusActive, snapshot.totalTaskCount > 0 {
@@ -813,28 +993,50 @@ struct NotchIslandView: View {
                             .font(.system(size: 9.5, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .foregroundStyle(Self.islandSecondary)
+                            .padding(.horizontal, 5.5)
+                            .padding(.vertical, 1.5)
+                            .background(Color.white.opacity(0.08), in: Capsule())
                     }
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 9.5, weight: .semibold))
                         .foregroundStyle(Self.islandSecondary)
                 }
-                .padding(.horizontal, 14)
-                .frame(width: cardWidth, height: topBandHeight)
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onExpandPanel)
+                .padding(.leading, 6)
+                .padding(.trailing, 12)
+                .frame(width: layout.peekRightWingWidth, height: height, alignment: .trailing)
             }
-
-            // Whisper-thin separator dividing the notch band from the below-notch card row
-            Rectangle()
-                .fill(Color.white.opacity(0.07))
-                .frame(width: max(0, cardWidth - 26), height: 0.5)
-
-            // Row 2: Full-width below-notch task & focus detail row
-            expandedCardDetailRow(snapshot: snapshot, height: detailHeight)
-                .padding(.horizontal, 13)
-                .frame(width: cardWidth, height: detailHeight)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onExpandPanel)
+        } else {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(accentColor)
+                    .frame(width: 5.5, height: 5.5)
+                Text(snapshot.noteTitle)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Self.islandSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if snapshot.keepAwake {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(focusColor)
+                }
+                if snapshot.focusActive, snapshot.totalTaskCount > 0 {
+                    Text("\(snapshot.completedCount)/\(snapshot.totalTaskCount)")
+                        .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(Self.islandSecondary)
+                }
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Self.islandSecondary)
+            }
+            .padding(.horizontal, 14)
+            .frame(width: cardWidth, height: height)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onExpandPanel)
         }
-        .frame(width: cardWidth, alignment: .top)
     }
 
     @ViewBuilder
@@ -894,7 +1096,7 @@ struct NotchIslandView: View {
                             .font(.system(size: 12, weight: .medium))
                             .monospacedDigit()
                             .foregroundStyle(.white)
-                    } else {
+                    } else if snapshot.keepAwake {
                         Image(systemName: "bolt.fill")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(focusColor)
@@ -990,9 +1192,11 @@ struct NotchIslandView: View {
                             .foregroundStyle(.white)
                             .lineLimit(1)
                     } else {
-                        Circle()
-                            .fill(focusColor.opacity(0.85))
-                            .frame(width: 5, height: 5)
+                        if snapshot.keepAwake {
+                            Circle()
+                                .fill(focusColor.opacity(0.85))
+                                .frame(width: 5, height: 5)
+                        }
                         Image(systemName: "chevron.down")
                             .font(.system(size: 8.5, weight: .semibold))
                             .foregroundStyle(Self.islandSecondary)
@@ -1171,6 +1375,49 @@ struct NotchIslandView: View {
     }
 }
 
+private struct CodexTaskRow: View {
+    let task: CodexTask
+    let failedToOpen: Bool
+    let open: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        let title = task.title ?? L10n.string("Untitled Codex task")
+        let subtitle = failedToOpen ? L10n.string("Could not open Codex chat") : task.project
+
+        Button(action: open) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.white.opacity(0.66))
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.66))
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: NotchIslandLayout.codexRowHeight)
+            .background(Color.white.opacity(hovered ? 0.08 : 0), in: RoundedRectangle(cornerRadius: 7))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(title)
+    }
+}
+
 final class IslandPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -1260,6 +1507,7 @@ final class NotchIslandCoordinator {
     private var peekExitWatchTimer: Timer?
     private var hoverExitDebounceTask: Task<Void, Never>?
     private var panelTransitionTask: Task<Void, Never>?
+    private var codexMonitor: Task<Void, Never>?
     private var fadeOutGeneration: UInt64 = 0
     private weak var preferredScreen: NSScreen?
     private var desiredMainPanelVisible = false
@@ -1356,6 +1604,7 @@ final class NotchIslandCoordinator {
         peekExitWatchTimer?.invalidate()
         hoverExitDebounceTask?.cancel()
         panelTransitionTask?.cancel()
+        codexMonitor?.cancel()
         if let screenObserver {
             NotificationCenter.default.removeObserver(screenObserver)
         }
@@ -1464,8 +1713,27 @@ final class NotchIslandCoordinator {
 
     func refreshForPreferencesChange() {
         model.refreshSnapshot()
+        updateCodexMonitoring()
         if !desiredMainPanelVisible {
             syncPresentation()
+        }
+    }
+
+    private func updateCodexMonitoring() {
+        if !store.preferences.notchIslandEnabled {
+            codexMonitor?.cancel()
+            codexMonitor = nil
+            model.setCodexActivity(.loading)
+            return
+        }
+        guard codexMonitor == nil else { return }
+        codexMonitor = Task.detached(priority: .utility) { [weak model] in
+            var reader = CodexTaskReader()
+            while !Task.isCancelled {
+                let activity = reader.refresh()
+                await model?.setCodexActivity(activity)
+                try? await Task.sleep(for: .seconds(3))
+            }
         }
     }
 

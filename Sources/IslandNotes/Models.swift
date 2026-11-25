@@ -144,6 +144,17 @@ enum ThemeMode: String, Codable, CaseIterable, Identifiable, Sendable {
     var id: String { rawValue }
 }
 
+enum IslandPreview: String, Codable, CaseIterable, Sendable {
+    case notes, codex
+
+    var label: String {
+        switch self {
+        case .notes: L10n.string("Notes")
+        case .codex: "Codex"
+        }
+    }
+}
+
 struct AppPreferences: Codable, Equatable, Sendable {
     var activationMode: ActivationMode = .click
     var keepAwake = false
@@ -151,9 +162,11 @@ struct AppPreferences: Codable, Equatable, Sendable {
     var breakIntervalMinutes = 45
     var themeMode: ThemeMode = .dark
     var notchIslandEnabled = true
+    var islandPreview: IslandPreview = .notes
 
     enum CodingKeys: String, CodingKey {
         case activationMode, keepAwake, breakReminderEnabled, breakIntervalMinutes, themeMode, notchIslandEnabled
+        case islandPreview
     }
 
     init() {}
@@ -166,6 +179,8 @@ struct AppPreferences: Codable, Equatable, Sendable {
         breakIntervalMinutes = try values.decodeIfPresent(Int.self, forKey: .breakIntervalMinutes) ?? 45
         themeMode = try values.decodeIfPresent(ThemeMode.self, forKey: .themeMode) ?? .dark
         notchIslandEnabled = try values.decodeIfPresent(Bool.self, forKey: .notchIslandEnabled) ?? true
+        let previewValue = try values.decodeIfPresent(String.self, forKey: .islandPreview)
+        islandPreview = previewValue.flatMap(IslandPreview.init(rawValue:)) ?? .notes
     }
 }
 
